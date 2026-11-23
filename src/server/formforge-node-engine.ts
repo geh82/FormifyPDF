@@ -2,24 +2,46 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  PDFArray,
   PDFCheckBox,
+  PDFDict,
   PDFDocument,
   PDFDropdown,
   PDFName,
+  PDFNumber,
+  PDFOptionList,
   PDFRadioGroup,
+  PDFString,
   PDFTextField,
   StandardFonts,
   rgb,
 } from "pdf-lib";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
-import { topLeftPdfToBottomLeftPdf } from "../lib/formforge/coordinate.ts";
+import {
+  bottomLeftPdfToTopLeftPdf,
+  computeRectIoU,
+  getVisualBoxSizePt,
+  normalizeRotation,
+  roundPt,
+  topLeftPdfToBottomLeftPdf,
+} from "../lib/formforge/coordinate.ts";
 import type {
   AcroFormValidationReport,
   DetectedFormField,
   DocumentPageInfo,
   FieldManifest,
   FormForgeFieldType,
+  PdfRect,
+  VisualAlignmentIssue,
+  VisualOverlapWarning,
+  VisualVerificationReport,
 } from "../lib/formforge/types.ts";
+import {
+  buildDetectionSummary,
+  fuseAndClassifyPageGeometry,
+  snakeCase,
+} from "./formforge-fusion.ts";
+import { extractPageStructuralGeometry } from "./pdf-vector-extractor.ts";
 
 // Configure worker path for Node.js pdfjs-dist usage
 const workerPath = path.resolve(
@@ -42,7 +64,10 @@ const PAPER_SIZES: Array<[DocumentPageInfo["paperSize"], number, number]> = [
   ["A5", 419.53, 595.28],
 ];
 
-function classifyPaperSize(widthPt: number, heightPt: number): DocumentPageInfo["paperSize"] {
+function classifyPaperSize(
+  widthPt: number,
+  heightPt: number
+): DocumentPageInfo["paperSize"] {
   const [w, h] = [widthPt, heightPt].sort((a, b) => a - b);
   for (const [name, pw, ph] of PAPER_SIZES) {
     const [sw, sh] = [pw, ph].sort((a, b) => a - b);
@@ -51,10 +76,6 @@ function classifyPaperSize(widthPt: number, heightPt: number): DocumentPageInfo[
     }
   }
   return "Custom";
-}
-
-function roundPt(v: number): number {
-  return Math.round(v * 100) / 100;
 }
 
 function toWinAnsiSafeText(input: string): string {
@@ -66,31 +87,6 @@ function toWinAnsiSafeText(input: string): string {
     .replace(/[\u2013\u2014]/g, "-")
     .replace(/\u2026/g, "...")
     .replace(/[^\x20-\x7E\xA0-\xFF]/g, " ");
-}
-
-function snakeCase(text: string, fallback = "field"): string {
-  let cleaned = text
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  if (!cleaned) cleaned = fallback;
-  if (/^\d/.test(cleaned)) cleaned = `f_${cleaned}`;
-  return cleaned.slice(0, 64);
-}
-
-function inferFieldTypeFromLabel(label: string): FormForgeFieldType {
-  const lower = label.toLowerCase();
-  if (lower.includes("email") || lower.includes("e-mail")) return "email";
-  if (lower.includes("phone") || lower.includes("tel") || lower.includes("cell") || lower.includes("mobile")) return "phone";
-  if (lower.includes("date") || lower.includes("dob") || lower.includes("yy/mm") || lower.includes("dd/mm")) return "date";
-  if (lower.includes("amount") || lower.includes("price") || lower.includes("total") || lower.includes("salary") || lower.includes("fee")) return "currency";
-  if (lower.includes("address") || lower.includes("street") || lower.includes("suburb") || lower.includes("postal")) return "address";
-  if (lower.includes("signature") || lower.includes("signed")) return "signature";
-  if (lower.includes("initial")) return "initials";
-  if (lower.includes("comment") || lower.includes("notes") || lower.includes("description")) return "multiline";
-  if (lower.includes("number") || lower.includes("count") || lower.includes("age") || lower.includes("code") || lower.includes("id ")) return "numeric";
-  return "text";
 }
 
 async function loadPdfDocument(pdfPath: string): Promise<{
@@ -127,6 +123,41 @@ async function loadPdfDocument(pdfPath: string): Promise<{
   return { bytes, pdfDoc, pdfjsDoc };
 }
 
+function extractExistingSignatureWidgets(
+  pdfDoc: PDFDocument,
+  pageIdx: number,
+  cropBox: { x: number; y: number; width: number; height: number },
+  rotation: 0 | 90 | 180 | 270
+): Array<{ name: string; type: FormForgeFieldType; rect: PdfRect }> {
+  const page = pdfDoc.getPage(pageIdx);
+  const annots = page.node.lookupMaybe(PDFName.of("Annots"), PDFArray);
+  if (!annots) return [];
+
+  const results: Array<{ name: string; type: FormForgeFieldType; rect: PdfRect }> = [];
+  for (let i = 0; i < annots.size(); i++) {
+    const dict = annots.lookupMaybe(i, PDFDict);
+    if (!dict) continue;
+    const ft = dict.lookupMaybe(PDFName.of("FT"), PDFName);
+    if (ft?.asString() !== "/Sig") continue;
+    const rectArr = dict.lookupMaybe(PDFName.of("Rect"), PDFArray);
+    if (!rectArr || rectArr.size() < 4) continue;
+    const coords: [number, number, number, number] = [
+      (rectArr.lookup(0) as PDFNumber)?.asNumber?.() ?? 0,
+      (rectArr.lookup(1) as PDFNumber)?.asNumber?.() ?? 0,
+      (rectArr.lookup(2) as PDFNumber)?.asNumber?.() ?? 0,
+      (rectArr.lookup(3) as PDFNumber)?.asNumber?.() ?? 0,
+    ];
+    const tObj = dict.lookupMaybe(PDFName.of("T"), PDFString);
+    const name = tObj?.decodeText() || `signature_${i + 1}`;
+    results.push({
+      name,
+      type: "signature",
+      rect: bottomLeftPdfToTopLeftPdf(coords, cropBox, rotation),
+    });
+  }
+  return results;
+}
+
 async function inspectPdfNode(pdfPath: string) {
   const { bytes, pdfDoc, pdfjsDoc } = await loadPdfDocument(pdfPath);
   try {
@@ -135,23 +166,24 @@ async function inspectPdfNode(pdfPath: string) {
       rawStr.includes("/JavaScript") || rawStr.includes("/JS ");
     const form = pdfDoc.getForm();
     const existingFields = form.getFields();
-    const hasExistingAcroForm = existingFields.length > 0;
 
     const pages: Array<DocumentPageInfo & { thumbnailFile?: string | null }> = [];
     let isScanned = false;
+    let totalWidgets = 0;
 
     for (let idx = 0; idx < pdfDoc.getPageCount(); idx++) {
       const page = pdfDoc.getPage(idx);
-      const { width, height } = page.getSize();
       const mediaBox = page.getMediaBox();
       const cropBox = page.getCropBox();
-      const rot = (((page.getRotation().angle || 0) % 360 + 360) % 360) as
-        | 0
-        | 90
-        | 180
-        | 270;
+      const rot = normalizeRotation(page.getRotation().angle);
+      const visualSize = getVisualBoxSizePt(cropBox, rot);
 
       const jsPage = await pdfjsDoc.getPage(idx + 1);
+      const opList = await jsPage.getOperatorList();
+      const drawingCount = opList.fnArray.filter(
+        (fn) => fn === pdfjsLib.OPS.constructPath
+      ).length;
+
       const textContent = await jsPage.getTextContent();
       const items = textContent.items.filter(
         (it) => "str" in it && typeof it.str === "string" && it.str.trim().length > 0
@@ -163,7 +195,6 @@ async function inspectPdfNode(pdfPath: string) {
       const needsOcr = wordCount < 10;
       if (needsOcr) isScanned = true;
 
-      // Count widgets on this page
       const pageRef = page.ref;
       let widgetCount = 0;
       for (const f of existingFields) {
@@ -171,14 +202,22 @@ async function inspectPdfNode(pdfPath: string) {
           if (w.P() === pageRef) widgetCount++;
         }
       }
+      widgetCount += extractExistingSignatureWidgets(
+        pdfDoc,
+        idx,
+        cropBox,
+        rot
+      ).length;
+      totalWidgets += widgetCount;
 
       pages.push({
         pageIndex: idx,
-        widthPt: roundPt(width),
-        heightPt: roundPt(height),
-        rotation: rot === 90 || rot === 180 || rot === 270 ? rot : 0,
-        orientation: width > height ? "landscape" : "portrait",
-        paperSize: classifyPaperSize(width, height),
+        widthPt: visualSize.widthPt,
+        heightPt: visualSize.heightPt,
+        rotation: rot,
+        orientation:
+          visualSize.widthPt > visualSize.heightPt ? "landscape" : "portrait",
+        paperSize: classifyPaperSize(visualSize.widthPt, visualSize.heightPt),
         mediaBox: {
           x: roundPt(mediaBox.x),
           y: roundPt(mediaBox.y),
@@ -193,7 +232,7 @@ async function inspectPdfNode(pdfPath: string) {
         },
         textSpanCount: items.length,
         wordCount,
-        drawingCount: 0,
+        drawingCount,
         existingWidgetCount: widgetCount,
         needsOcr,
         ocrApplied: false,
@@ -205,7 +244,7 @@ async function inspectPdfNode(pdfPath: string) {
     return {
       pageCount: pdfDoc.getPageCount(),
       isScanned,
-      hasExistingAcroForm,
+      hasExistingAcroForm: existingFields.length > 0 || totalWidgets > 0,
       securityFlags: {
         hasEmbeddedJavaScript,
         wasEncrypted: false,
@@ -227,181 +266,166 @@ async function analyzePdfNode(
     const inspection = await inspectPdfNode(pdfPath);
     const form = pdfDoc.getForm();
     const existingFields = form.getFields();
-    const fields: DetectedFormField[] = [];
+    const allFields: DetectedFormField[] = [];
     const seenNames = new Set<string>();
 
     const uniqueName = (base: string): string => {
-      let candidate = snakeCase(base, "field");
+      const cleanBase = snakeCase(base, "field");
+      let candidate = cleanBase;
       let i = 2;
       while (seenNames.has(candidate)) {
-        candidate = `${snakeCase(base, "field")}_${i++}`;
+        candidate = `${cleanBase}_${i++}`;
       }
       seenNames.add(candidate);
       return candidate;
     };
 
-    // 1. Extract existing AcroForm widgets if present
-    if (existingFields.length > 0) {
-      const pageMap = new Map<unknown, number>();
-      pdfDoc.getPages().forEach((p, idx) => pageMap.set(p.ref, idx));
+    const pageRefToIndex = new Map<unknown, number>();
+    pdfDoc.getPages().forEach((p, idx) => pageRefToIndex.set(p.ref, idx));
 
-      let idxCounter = 1;
+    for (let pIdx = 0; pIdx < pdfDoc.getPageCount(); pIdx++) {
+      const pageInfo = inspection.pages[pIdx];
+      const page = pdfDoc.getPage(pIdx);
+      const cropBox = page.getCropBox();
+      const rot = pageInfo.rotation;
+
+      // Collect existing widgets on this page mapped via exact cropBox + rotation
+      const existingOnPage: Array<{
+        name: string;
+        type: FormForgeFieldType;
+        rect: PdfRect;
+        defaultValue?: string;
+        maxLength?: number;
+        options?: string[];
+      }> = [];
+
       for (const fld of existingFields) {
-        const name = fld.getName() || `field_${idxCounter}`;
+        const name = fld.getName();
         const widgets = fld.acroField.getWidgets();
-        if (widgets.length === 0) continue;
-        const w = widgets[0];
-        const pageIdx = pageMap.get(w.P()) ?? 0;
-        const pageInfo = inspection.pages[pageIdx] || inspection.pages[0];
+        const matchingWidgets = widgets.filter((w) => {
+          const wPage = pageRefToIndex.get(w.P());
+          return (wPage ?? 0) === pIdx;
+        });
+        if (matchingWidgets.length === 0) continue;
+
+        const w = matchingWidgets[0];
         const r = w.getRectangle();
-        const topY = pageInfo.heightPt - (r.y + r.height);
+        const rect = bottomLeftPdfToTopLeftPdf(
+          [r.x, r.y, r.x + r.width, r.y + r.height],
+          cropBox,
+          rot
+        );
 
         let ftype: FormForgeFieldType = "text";
+        let maxLen: number | undefined;
+        let opts: string[] = [];
         if (fld instanceof PDFCheckBox) ftype = "checkbox";
-        else if (fld instanceof PDFRadioGroup) ftype = "radio";
-        else if (fld instanceof PDFDropdown) ftype = "dropdown";
-        else if (fld instanceof PDFTextField && fld.isMultiline()) ftype = "multiline";
+        else if (fld instanceof PDFRadioGroup) {
+          ftype = "radio";
+          opts = fld.getOptions();
+        } else if (fld instanceof PDFDropdown) {
+          ftype = "dropdown";
+          opts = fld.getOptions();
+        } else if (fld instanceof PDFOptionList) {
+          ftype = "listbox";
+          opts = fld.getOptions();
+        } else if (fld instanceof PDFTextField) {
+          if (fld.isMultiline()) ftype = "multiline";
+          maxLen = fld.getMaxLength();
+        }
 
-        fields.push({
-          id: `fld_${String(idxCounter++).padStart(3, "0")}`,
-          name: uniqueName(name),
-          label: name,
+        existingOnPage.push({
+          name,
           type: ftype,
-          page: pageIdx,
-          rect: {
-            x: roundPt(Math.max(0, r.x)),
-            y: roundPt(Math.max(0, topY)),
-            width: roundPt(Math.max(12, r.width)),
-            height: roundPt(Math.max(12, r.height)),
-          },
-          coordinateSpace: "top_left_pdf_pt",
-          originalLabelText: name,
-          detectionSource: "existing_acroform",
-          confidence: 0.98,
-          confidenceTier: "high",
-          confidenceEvidence: ["Extracted from existing PDF AcroForm widget"],
-          required: false,
-          defaultValue: "",
-          multiline: ftype === "multiline",
-          options: fld instanceof PDFDropdown ? fld.getOptions() : [],
-          validation: {},
-          reviewStatus: "accepted",
+          rect,
+          maxLength: maxLen,
+          options: opts,
         });
       }
-    }
 
-    // 2. Heuristic label + input slot detection from text spans when no AcroForm fields exist
-    if (fields.length === 0) {
-      let idxCounter = 1;
-      for (let pIdx = 0; pIdx < pdfDoc.getPageCount(); pIdx++) {
-        const pageInfo = inspection.pages[pIdx];
-        const jsPage = await pdfjsDoc.getPage(pIdx + 1);
-        const textContent = await jsPage.getTextContent();
-
-        for (const item of textContent.items) {
-          if (!("str" in item) || typeof item.str !== "string") continue;
-          const raw = item.str.trim();
-          if (raw.length < 2 || raw.length > 60) continue;
-
-          const hasPrompt =
-            raw.endsWith(":") ||
-            /_{3,}/.test(raw) ||
-            /^\[\s*\]/.test(raw) ||
-            /^☐/.test(raw);
-          if (!hasPrompt) continue;
-
-          const cleanLabel = raw
-            .replace(/_{2,}/g, "")
-            .replace(/[:\[\]☐]/g, "")
-            .trim();
-          if (cleanLabel.length < 2) continue;
-
-          const tx = item.transform[4] ?? 40;
-          const tyBottom = item.transform[5] ?? 700;
-          const itemH = Math.max(12, item.height || 12);
-          const itemW = Math.max(20, item.width || cleanLabel.length * 6);
-          const topY = Math.max(8, pageInfo.heightPt - tyBottom - itemH);
-
-          const isCheckbox = raw.includes("[ ]") || raw.includes("☐");
-          const fieldX = isCheckbox
-            ? roundPt(Math.max(8, tx))
-            : roundPt(Math.min(pageInfo.widthPt - 140, tx + itemW + 8));
-          const fieldW = isCheckbox
-            ? 14
-            : roundPt(Math.max(80, Math.min(240, pageInfo.widthPt - fieldX - 36)));
-
-          const ftype = isCheckbox ? "checkbox" : inferFieldTypeFromLabel(cleanLabel);
-
-          fields.push({
-            id: `fld_${String(idxCounter++).padStart(3, "0")}`,
-            name: uniqueName(cleanLabel),
-            label: cleanLabel,
-            type: ftype,
-            page: pIdx,
-            rect: {
-              x: fieldX,
-              y: roundPt(topY),
-              width: fieldW,
-              height: isCheckbox ? 14 : 18,
-            },
-            coordinateSpace: "top_left_pdf_pt",
-            originalLabelText: raw,
-            detectionSource: "vector_underline",
-            confidence: 0.78,
-            confidenceTier: "medium",
-            confidenceEvidence: ["Detected form label / underline cue in PDF text layer"],
-            required: false,
-            defaultValue: "",
-            multiline: ftype === "multiline",
-            options: [],
-            validation: {},
-            reviewStatus: "pending",
-          });
-        }
+      for (const sig of extractExistingSignatureWidgets(
+        pdfDoc,
+        pIdx,
+        cropBox,
+        rot
+      )) {
+        existingOnPage.push(sig);
       }
+
+      // Extract full vector structural geometry + text + symbol glyphs via pdfjs-dist
+      const jsPage = await pdfjsDoc.getPage(pIdx + 1);
+      const geom = await extractPageStructuralGeometry(jsPage, pIdx);
+
+      const pageFields = fuseAndClassifyPageGeometry({
+        geom,
+        pageBox: pageInfo.cropBox,
+        rotation: rot,
+        existingWidgets: existingOnPage,
+        uniqueName,
+      });
+
+      allFields.push(...pageFields);
     }
 
-    // 3. Fallback baseline fields if document is scanned/image-only without OCR
-    if (fields.length === 0) {
+    // Fallback baseline field only if document is purely scanned/image-only and no vector geometry exists
+    if (allFields.length === 0 && inspection.pages.length > 0) {
       const p0 = inspection.pages[0];
-      fields.push({
-        id: "fld_001",
-        name: "applicant_name",
-        label: "Applicant Name",
+      const fallbackRect: PdfRect = {
+        x: 72,
+        y: 140,
+        width: roundPt(Math.min(260, p0.widthPt - 144)),
+        height: 20,
+      };
+      allFields.push({
+        id: "field_001",
+        name: "scanned_review_field",
+        label: "Scanned Input Area (OCR / Python CV Recommended)",
         type: "text",
         page: 0,
-        rect: {
-          x: 72,
-          y: 140,
-          width: roundPt(Math.min(260, p0.widthPt - 144)),
-          height: 20,
-        },
+        originalDetectedRect: fallbackRect,
+        rect: fallbackRect,
+        pdfBottomLeftRect: topLeftPdfToBottomLeftPdf(
+          fallbackRect,
+          p0.cropBox,
+          p0.rotation
+        ),
         coordinateSpace: "top_left_pdf_pt",
-        originalLabelText: "Applicant Name",
+        originalLabelText: "",
         detectionSource: "manual",
-        confidence: 0.45,
+        detectionSources: ["manual"],
+        confidence: 0.35,
         confidenceTier: "low",
-        confidenceEvidence: ["Placeholder field created for scanned/untagged PDF — adjust in visual editor"],
+        confidenceEvidence: [
+          "Image-only page without vector text or line geometry; run Python OpenCV/OCR or place fields manually",
+        ],
         required: false,
         defaultValue: "",
         multiline: false,
         options: [],
         validation: {},
         reviewStatus: "pending",
+        reviewFlagReason: "Image-only PDF requires OpenCV/OCR or manual placement",
       });
     }
 
+    allFields.forEach((f, idx) => {
+      f.id = `field_${String(idx + 1).padStart(3, "0")}`;
+    });
+
     const docId =
       typeof options.documentId === "string" ? options.documentId : "doc_node";
+
+    const detectionSummary = buildDetectionSummary(allFields, "node_vector_fusion");
 
     const manifest: FieldManifest = {
       documentId: docId,
       schemaVersion: "1.0",
       totalPages: inspection.pageCount,
       pages: inspection.pages,
-      fields,
+      fields: allFields,
+      detectionSummary,
       generatedAt: new Date().toISOString(),
-      engineVersion: "formforge-node-1.0.0",
+      engineVersion: "formforge-node-fusion-2.0.0",
       hasExistingAcroForm: inspection.hasExistingAcroForm,
       isScanned: inspection.isScanned,
       securityFlags: inspection.securityFlags,
@@ -431,47 +455,184 @@ async function generateAcroFormNode(payload: {
   let createdWidgets = 0;
   const usedNames = new Set<string>(form.getFields().map((f) => f.getName()));
 
+  const ensureSignatureWidgetOnPage = (
+    page: (typeof pages)[number],
+    fieldName: string,
+    label: string,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number
+  ) => {
+    const widgetDict = pdfDoc.context.obj({
+      Type: "Annot",
+      Subtype: "Widget",
+      FT: "Sig",
+      T: PDFString.of(fieldName),
+      TU: PDFString.of(label || fieldName),
+      Rect: [x0, y0, x1, y1],
+      F: 4,
+      P: page.ref,
+      BS: { W: 0.75, S: "S" },
+      MK: {
+        BG: [0.97, 0.99, 1.0],
+        BC: [0.45, 0.56, 0.72],
+      },
+    });
+    const widgetRef = pdfDoc.context.register(widgetDict);
+
+    let annots = page.node.lookupMaybe(PDFName.of("Annots"), PDFArray);
+    if (!annots) {
+      annots = pdfDoc.context.obj([]) as PDFArray;
+      page.node.set(PDFName.of("Annots"), annots);
+    }
+    annots.push(widgetRef);
+
+    const acroFormDict = form.acroForm.dict;
+    let acroFields = acroFormDict.lookupMaybe(PDFName.of("Fields"), PDFArray);
+    if (!acroFields) {
+      acroFields = pdfDoc.context.obj([]) as PDFArray;
+      acroFormDict.set(PDFName.of("Fields"), acroFields);
+    }
+    acroFields.push(widgetRef);
+  };
+
   for (const fld of manifest.fields) {
     const page = pages[fld.page];
     if (!page) continue;
+
+    const crop = page.getCropBox();
+    const rot = normalizeRotation(page.getRotation().angle);
+    const cropBox = {
+      x: crop.x,
+      y: crop.y,
+      width: crop.width,
+      height: crop.height,
+    };
 
     let fieldName = fld.name || fld.id;
     let suffix = 2;
     while (usedNames.has(fieldName)) {
       fieldName = `${fld.name || fld.id}_${suffix++}`;
     }
-    usedNames.add(fieldName);
 
-    const crop = page.getCropBox();
-    const [x0, y0, x1, y1] = topLeftPdfToBottomLeftPdf(fld.rect, {
-      x: crop.x,
-      y: crop.y,
-      width: crop.width,
-      height: crop.height,
-    });
+    // Character-entry grids: generate native PDF Comb field when strategy is 'comb' (or default for contiguous uniform cells),
+    // or individual single-character linked widgets when cells are visibly separated.
+    if (
+      fld.type === "char_cells" &&
+      fld.cellRects &&
+      fld.cellRects.length >= 2
+    ) {
+      const strategy =
+        fld.charGridMeta?.acroformStrategy ??
+        ((fld.charGridMeta?.spacingPt ?? 0) <= 2.5 ? "comb" : "individual_cells");
+
+      if (strategy === "comb") {
+        usedNames.add(fieldName);
+        const [x0, y0, x1, y1] = topLeftPdfToBottomLeftPdf(fld.rect, cropBox, rot);
+        const tf = form.createTextField(fieldName);
+        tf.setMaxLength(fld.cellRects.length);
+        tf.enableCombing();
+        if (fld.defaultValue) {
+          tf.setText(toWinAnsiSafeText(fld.defaultValue).slice(0, fld.cellRects.length));
+        }
+        tf.addToPage(page, {
+          x: x0,
+          y: y0,
+          width: Math.max(12, x1 - x0),
+          height: Math.max(8, y1 - y0),
+        });
+        createdWidgets++;
+      } else {
+        for (let ci = 0; ci < fld.cellRects.length; ci++) {
+          const cname = `${fieldName}_cell_${ci}`;
+          if (usedNames.has(cname)) continue;
+          usedNames.add(cname);
+          const cr = fld.cellRects[ci];
+          const [cx0, cy0, cx1, cy1] = topLeftPdfToBottomLeftPdf(cr, cropBox, rot);
+          const tf = form.createTextField(cname);
+          tf.setMaxLength(1);
+          if (fld.defaultValue && ci < fld.defaultValue.length) {
+            tf.setText(toWinAnsiSafeText(fld.defaultValue[ci]));
+          }
+          tf.addToPage(page, {
+            x: cx0,
+            y: cy0,
+            width: Math.max(6, cx1 - cx0),
+            height: Math.max(6, cy1 - cy0),
+          });
+          createdWidgets++;
+        }
+      }
+      continue;
+    }
+
+    usedNames.add(fieldName);
+    const [x0, y0, x1, y1] = topLeftPdfToBottomLeftPdf(fld.rect, cropBox, rot);
     const w = Math.max(6, x1 - x0);
     const h = Math.max(6, y1 - y0);
 
     if (fld.type === "checkbox") {
       const cb = form.createCheckBox(fieldName);
       cb.addToPage(page, { x: x0, y: y0, width: w, height: h });
+      if (isTruthyCheckValue(fld.defaultValue)) cb.check();
       createdWidgets++;
-    } else if (fld.type === "dropdown" && fld.options.length > 0) {
+    } else if (fld.type === "signature") {
+      ensureSignatureWidgetOnPage(
+        page,
+        fieldName,
+        fld.label || fieldName,
+        x0,
+        y0,
+        x1,
+        y1
+      );
+      createdWidgets++;
+    } else if (fld.type === "dropdown") {
       const dd = form.createDropdown(fieldName);
-      dd.addOptions(fld.options);
+      const opts = fld.options.length > 0 ? fld.options : ["Option 1", "Option 2"];
+      dd.addOptions(opts);
+      if (fld.defaultValue && opts.includes(fld.defaultValue)) {
+        dd.select(fld.defaultValue);
+      }
       dd.addToPage(page, { x: x0, y: y0, width: w, height: h });
       createdWidgets++;
-    } else if (fld.type === "radio" && fld.options.length > 0) {
+    } else if (fld.type === "listbox") {
+      const ol = form.createOptionList(fieldName);
+      const opts = fld.options.length > 0 ? fld.options : ["Option 1", "Option 2"];
+      ol.addOptions(opts);
+      if (fld.defaultValue && opts.includes(fld.defaultValue)) {
+        ol.select(fld.defaultValue);
+      }
+      ol.addToPage(page, { x: x0, y: y0, width: w, height: h });
+      createdWidgets++;
+    } else if (fld.type === "radio") {
       const rg = form.createRadioGroup(fieldName);
-      const optW = Math.max(10, Math.min(18, w / fld.options.length));
-      fld.options.forEach((opt, i) => {
+      const opts = fld.options.length > 0 ? fld.options : ["Yes", "No"];
+      const sliceW = fld.rect.width / opts.length;
+      opts.forEach((opt, i) => {
+        const optTopRect: PdfRect =
+          fld.optionRects?.[opt] ?? {
+            x: fld.rect.x + i * sliceW,
+            y: fld.rect.y,
+            width: Math.max(10, Math.min(18, sliceW - 2)),
+            height: fld.rect.height,
+          };
+        const [ox0, oy0, ox1, oy1] = topLeftPdfToBottomLeftPdf(
+          optTopRect,
+          cropBox,
+          rot
+        );
         rg.addOptionToPage(opt, page, {
-          x: x0 + i * (optW + 4),
-          y: y0,
-          width: optW,
-          height: h,
+          x: ox0,
+          y: oy0,
+          width: Math.max(8, ox1 - ox0),
+          height: Math.max(8, oy1 - oy0),
         });
       });
+      if (fld.defaultValue && opts.includes(fld.defaultValue)) {
+        rg.select(fld.defaultValue);
+      }
       createdWidgets++;
     } else {
       const tf = form.createTextField(fieldName);
@@ -482,7 +643,7 @@ async function generateAcroFormNode(payload: {
         tf.setMaxLength(fld.maxLength);
       }
       if (fld.defaultValue) {
-        tf.setText(fld.defaultValue);
+        tf.setText(toWinAnsiSafeText(fld.defaultValue));
       }
       tf.addToPage(page, { x: x0, y: y0, width: w, height: h });
       createdWidgets++;
@@ -495,7 +656,8 @@ async function generateAcroFormNode(payload: {
 
   const validation = await validateAcroFormNode(
     payload.outputPdfPath,
-    manifest.fields.length
+    manifest.fields.length,
+    manifest.fields
   );
 
   return {
@@ -568,13 +730,27 @@ async function renderPdfNode(payload: {
 
   let populatedWidgets = 0;
   const flatValues = flattenRenderValues(payload.values || {});
-
-  // Populate AcroForm widgets if present
   const formFieldsByName = new Map(form.getFields().map((f) => [f.getName(), f]));
 
   for (const fld of payload.manifest.fields) {
     const rawVal = resolveFieldRenderValue(fld, flatValues);
     if (rawVal === undefined || rawVal === null || rawVal === "") continue;
+
+    // Populate individual char_cells widgets if generated separately
+    if (fld.type === "char_cells" && fld.cellRects && !formFieldsByName.has(fld.name)) {
+      const cellZero = formFieldsByName.get(`${fld.name}_cell_0`);
+      if (cellZero) {
+        const s = toWinAnsiSafeText(String(rawVal)).trim();
+        for (let ci = 0; ci < fld.cellRects.length; ci++) {
+          const cf = formFieldsByName.get(`${fld.name}_cell_${ci}`);
+          if (cf instanceof PDFTextField) {
+            cf.setText(ci < s.length ? s[ci] : "");
+          }
+        }
+        populatedWidgets++;
+        continue;
+      }
+    }
 
     const acField = formFieldsByName.get(fld.name) || formFieldsByName.get(fld.id);
     if (acField) {
@@ -590,7 +766,7 @@ async function renderPdfNode(payload: {
         }
         populatedWidgets++;
         continue;
-      } else if (acField instanceof PDFDropdown) {
+      } else if (acField instanceof PDFDropdown || acField instanceof PDFOptionList) {
         acField.select(String(rawVal));
         populatedWidgets++;
         continue;
@@ -605,18 +781,19 @@ async function renderPdfNode(payload: {
     const page = pages[fld.page];
     if (!page) continue;
     const crop = page.getCropBox();
+    const rot = normalizeRotation(page.getRotation().angle);
     const cropRect = {
       x: crop.x,
       y: crop.y,
       width: crop.width,
       height: crop.height,
     };
-    const [x0, y0, x1, y1] = topLeftPdfToBottomLeftPdf(fld.rect, cropRect);
+    const [x0, y0, x1, y1] = topLeftPdfToBottomLeftPdf(fld.rect, cropRect, rot);
 
     if (fld.type === "checkbox") {
       if (isTruthyCheckValue(rawVal)) {
         const box = fld.optionRects?.true ?? fld.rect;
-        const [bx0, by0, bx1, by1] = topLeftPdfToBottomLeftPdf(box, cropRect);
+        const [bx0, by0, bx1, by1] = topLeftPdfToBottomLeftPdf(box, cropRect, rot);
         const bw = bx1 - bx0;
         const bh = by1 - by0;
         const size = Math.max(8, Math.min(12, bh - 2));
@@ -651,7 +828,11 @@ async function renderPdfNode(payload: {
         if (directKey) targetBox = fld.optionRects[directKey];
       }
       if (targetBox) {
-        const [ox0, oy0, ox1, oy1] = topLeftPdfToBottomLeftPdf(targetBox, cropRect);
+        const [ox0, oy0, ox1, oy1] = topLeftPdfToBottomLeftPdf(
+          targetBox,
+          cropRect,
+          rot
+        );
         const ow = ox1 - ox0;
         const oh = oy1 - oy0;
         const size = Math.max(8, Math.min(12, oh - 2));
@@ -678,7 +859,7 @@ async function renderPdfNode(payload: {
         const ch = padded[i];
         if (!ch || ch === " ") continue;
         const cr = fld.cellRects[i];
-        const [cx0, cy0, cx1, cy1] = topLeftPdfToBottomLeftPdf(cr, cropRect);
+        const [cx0, cy0, cx1, cy1] = topLeftPdfToBottomLeftPdf(cr, cropRect, rot);
         const cw = cx1 - cx0;
         const fontSize = cw < 11.2 ? Math.min(9.5, Math.max(7.5, cw * 0.72)) : 9.5;
         const chW = font.widthOfTextAtSize(ch, fontSize);
@@ -722,31 +903,253 @@ async function renderPdfNode(payload: {
   };
 }
 
+/**
+ * Automated Visual & Structural AcroForm Verification:
+ * Re-reads generated AcroForm widgets, transforms their /Rect coordinates back to top-left PDF points,
+ * verifies alignment IoU, sizing ratios, missing fields, duplicates, and overlaps.
+ */
 async function validateAcroFormNode(
   pdfPath: string,
-  expectedFieldCount = 0
+  expectedFieldCount = 0,
+  expectedFields?: DetectedFormField[]
 ): Promise<AcroFormValidationReport> {
   const bytes = fs.readFileSync(pdfPath);
   const pdfDoc = await PDFDocument.load(bytes);
   const form = pdfDoc.getForm();
   const fields = form.getFields();
+  const pages = pdfDoc.getPages();
   const hasAcroForm = pdfDoc.catalog.has(PDFName.of("AcroForm"));
 
+  const pageRefToIndex = new Map<unknown, number>();
+  pages.forEach((p, idx) => pageRefToIndex.set(p.ref, idx));
+
   let widgetCount = 0;
+  let combFieldCount = 0;
+  const extractedWidgets: Array<{
+    name: string;
+    page: number;
+    rect: PdfRect;
+  }> = [];
+  const nameCounts = new Map<string, number>();
+
   for (const f of fields) {
-    widgetCount += f.acroField.getWidgets().length;
+    const fname = f.getName();
+    nameCounts.set(fname, (nameCounts.get(fname) || 0) + 1);
+    if (f instanceof PDFTextField && (f.acroField.getFlags() & (1 << 24)) !== 0) {
+      combFieldCount++;
+    }
+    const ws = f.acroField.getWidgets();
+    widgetCount += ws.length;
+    for (const w of ws) {
+      const pIdx = pageRefToIndex.get(w.P()) ?? 0;
+      const page = pages[pIdx] || pages[0];
+      const crop = page.getCropBox();
+      const rot = normalizeRotation(page.getRotation().angle);
+      const r = w.getRectangle();
+      extractedWidgets.push({
+        name: fname,
+        page: pIdx,
+        rect: bottomLeftPdfToTopLeftPdf([r.x, r.y, r.x + r.width, r.y + r.height], crop, rot),
+      });
+    }
+  }
+
+  // Include /FT /Sig annotations
+  for (let pIdx = 0; pIdx < pages.length; pIdx++) {
+    const page = pages[pIdx];
+    const crop = page.getCropBox();
+    const rot = normalizeRotation(page.getRotation().angle);
+    for (const sig of extractExistingSignatureWidgets(pdfDoc, pIdx, crop, rot)) {
+      widgetCount++;
+      nameCounts.set(sig.name, (nameCounts.get(sig.name) || 0) + 1);
+      extractedWidgets.push({
+        name: sig.name,
+        page: pIdx,
+        rect: sig.rect,
+      });
+    }
+  }
+
+  const duplicateWidgetNames = Array.from(nameCounts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([name]) => name);
+
+  // Round-trip write & read verification via pdf-lib in memory
+  let roundTripOk = true;
+  try {
+    const firstText = fields.find((f) => f instanceof PDFTextField) as
+      | PDFTextField
+      | undefined;
+    if (firstText) {
+      const orig = firstText.getText() || "";
+      firstText.setText("V");
+      const saved = await pdfDoc.save();
+      const reloaded = await PDFDocument.load(saved);
+      const reloadedTf = reloaded.getForm().getTextField(firstText.getName());
+      roundTripOk = reloadedTf.getText() === "V";
+      firstText.setText(orig);
+    }
+  } catch {
+    roundTripOk = false;
+  }
+
+  // Visual verification against expected manifest targets
+  const misplacedFields: VisualAlignmentIssue[] = [];
+  const oversizedFields: VisualAlignmentIssue[] = [];
+  const undersizedFields: VisualAlignmentIssue[] = [];
+  const missingFields: string[] = [];
+  const overlappingWidgetPairs: VisualOverlapWarning[] = [];
+
+  let checkedWidgets = 0;
+  let alignedCount = 0;
+  let iouSum = 0;
+  let minIoU = 1;
+
+  if (expectedFields && expectedFields.length > 0) {
+    for (const target of expectedFields) {
+      const matching = extractedWidgets.filter(
+        (w) =>
+          w.page === target.page &&
+          (w.name === target.name || w.name.startsWith(`${target.name}_cell_`))
+      );
+      if (matching.length === 0) {
+        missingFields.push(target.name);
+        continue;
+      }
+
+      // Compute union rect if multi-widget (radio or individual_cells)
+      const ux0 = Math.min(...matching.map((m) => m.rect.x));
+      const uy0 = Math.min(...matching.map((m) => m.rect.y));
+      const ux1 = Math.max(...matching.map((m) => m.rect.x + m.rect.width));
+      const uy1 = Math.max(...matching.map((m) => m.rect.y + m.rect.height));
+      const unionRect: PdfRect = {
+        x: roundPt(ux0),
+        y: roundPt(uy0),
+        width: roundPt(ux1 - ux0),
+        height: roundPt(uy1 - uy0),
+      };
+
+      const iou = computeRectIoU(target.rect, unionRect);
+      const targetArea = Math.max(1, target.rect.width * target.rect.height);
+      const widgetArea = Math.max(1, unionRect.width * unionRect.height);
+      const areaRatio = roundPt(widgetArea / targetArea);
+      const centerOffsetPt = roundPt(
+        Math.hypot(
+          unionRect.x + unionRect.width / 2 - (target.rect.x + target.rect.width / 2),
+          unionRect.y + unionRect.height / 2 - (target.rect.y + target.rect.height / 2)
+        )
+      );
+
+      checkedWidgets++;
+      iouSum += iou;
+      if (iou < minIoU) minIoU = iou;
+
+      if (areaRatio > 1.85) {
+        oversizedFields.push({
+          fieldId: target.id,
+          fieldName: target.name,
+          page: target.page,
+          issue: "oversized",
+          iou,
+          areaRatio,
+          centerOffsetPt,
+          detail: `Widget area ${areaRatio}x target area`,
+        });
+      } else if (areaRatio < 0.45) {
+        undersizedFields.push({
+          fieldId: target.id,
+          fieldName: target.name,
+          page: target.page,
+          issue: "undersized",
+          iou,
+          areaRatio,
+          centerOffsetPt,
+          detail: `Widget area ${areaRatio}x target area`,
+        });
+      } else if (iou < 0.6) {
+        misplacedFields.push({
+          fieldId: target.id,
+          fieldName: target.name,
+          page: target.page,
+          issue: "misplaced",
+          iou,
+          areaRatio,
+          centerOffsetPt,
+          detail: `Alignment IoU ${iou} (< 0.60), center offset ${centerOffsetPt}pt`,
+        });
+      } else {
+        alignedCount++;
+      }
+    }
+  }
+
+  // Check pairwise widget overlaps between distinct field names
+  for (let i = 0; i < extractedWidgets.length; i++) {
+    for (let j = i + 1; j < extractedWidgets.length; j++) {
+      const a = extractedWidgets[i];
+      const b = extractedWidgets[j];
+      if (a.page !== b.page || a.name === b.name) continue;
+      const iou = computeRectIoU(a.rect, b.rect);
+      if (iou > 0.35) {
+        overlappingWidgetPairs.push({
+          fieldA: a.name,
+          fieldB: b.name,
+          page: a.page,
+          iou,
+        });
+      }
+    }
+  }
+
+  const meanIoU = checkedWidgets > 0 ? roundPt(iouSum / checkedWidgets) : 1;
+  const effectiveMinIoU = checkedWidgets > 0 ? roundPt(minIoU) : 1;
+  const passed =
+    missingFields.length === 0 &&
+    misplacedFields.length === 0 &&
+    oversizedFields.length === 0 &&
+    undersizedFields.length === 0 &&
+    duplicateWidgetNames.length === 0;
+
+  const visualVerification: VisualVerificationReport = {
+    checkedWidgets,
+    alignedCount,
+    meanIoU,
+    minIoU: effectiveMinIoU,
+    combFieldCount,
+    misplacedFields,
+    oversizedFields,
+    undersizedFields,
+    missingFields,
+    overlappingWidgetPairs,
+    duplicateWidgetNames,
+    passed,
+    summary:
+      checkedWidgets === 0
+        ? `Structural validation passed (${widgetCount} widgets)`
+        : `${alignedCount}/${checkedWidgets} widgets aligned (mean IoU ${meanIoU}, ${combFieldCount} comb fields, ${missingFields.length} missing, ${overlappingWidgetPairs.length} overlaps)`,
+  };
+
+  const warnings: string[] = [];
+  if (missingFields.length > 0) {
+    warnings.push(`Missing widgets: ${missingFields.join(", ")}`);
+  }
+  if (overlappingWidgetPairs.length > 0) {
+    warnings.push(
+      `${overlappingWidgetPairs.length} overlapping widget pair(s) detected`
+    );
   }
 
   return {
     validPdf: true,
-    hasAcroFormDict: hasAcroForm || fields.length > 0,
+    hasAcroFormDict: hasAcroForm || widgetCount > 0,
     widgetCount,
     expectedFieldCount: expectedFieldCount || fields.length,
-    missingFields: [],
+    missingFields,
     appearanceStreamsVerified: true,
-    roundTripWriteReadOk: true,
+    roundTripWriteReadOk: roundTripOk,
     pageCount: pdfDoc.getPageCount(),
-    warnings: [],
+    warnings,
+    visualVerification,
   };
 }
 
@@ -783,7 +1186,8 @@ export async function runFormForgeNodeEngine<T = unknown>(
     case "validate-acroform":
       return (await validateAcroFormNode(
         String(payload.pdfPath),
-        Number(payload.expectedFieldCount || 0)
+        Number(payload.expectedFieldCount || 0),
+        payload.expectedFields as DetectedFormField[] | undefined
       )) as T;
     default:
       throw new Error(`Unsupported FormForge command: ${command}`);

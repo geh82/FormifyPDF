@@ -19,12 +19,41 @@ export const FormForgeFieldTypeSchema = z.enum([
   "checkbox",
   "radio",
   "dropdown",
+  "listbox",
   "signature",
   "initials",
   "table_cell",
   "char_cells",
   "repeating_group",
 ]);
+
+export const DetectionSourceSchema = z.enum([
+  "pdf_structural",
+  "vector_underline",
+  "vector_box",
+  "vector_char_cells",
+  "vector_comb_grid",
+  "vector_checkbox",
+  "vector_radio",
+  "glyph_symbol",
+  "table_cell",
+  "existing_acroform",
+  "cv_contour",
+  "cv_circle",
+  "ocr_region",
+  "paddleocr",
+  "ai_semantic_fusion",
+  "manual",
+]);
+
+export const CharGridMetadataSchema = z.object({
+  cellCount: z.number().int().min(1).max(200),
+  cellWidthPt: z.number().finite().positive(),
+  cellHeightPt: z.number().finite().positive(),
+  spacingPt: z.number().finite(),
+  readingDirection: z.enum(["ltr", "rtl"]).default("ltr"),
+  acroformStrategy: z.enum(["comb", "individual_cells"]).default("comb"),
+});
 
 export const DetectedFormFieldSchema = z.object({
   id: z.string().min(1).max(80),
@@ -37,10 +66,16 @@ export const DetectedFormFieldSchema = z.object({
   type: FormForgeFieldTypeSchema,
   page: z.number().int().min(0),
   rect: PdfRectSchema,
+  originalDetectedRect: PdfRectSchema.nullish().transform((v) => v ?? undefined),
+  pdfBottomLeftRect: z
+    .tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()])
+    .nullish()
+    .transform((v) => v ?? undefined),
   cellRects: z
     .array(PdfRectSchema)
     .nullish()
     .transform((v) => v ?? undefined),
+  charGridMeta: CharGridMetadataSchema.nullish().transform((v) => v ?? undefined),
   optionRects: z
     .record(z.string(), PdfRectSchema)
     .nullish()
@@ -51,20 +86,11 @@ export const DetectedFormFieldSchema = z.object({
     .max(300)
     .nullish()
     .transform((v) => v ?? ""),
-  detectionSource: z
-    .enum([
-      "vector_underline",
-      "vector_box",
-      "vector_char_cells",
-      "vector_checkbox",
-      "vector_radio",
-      "table_cell",
-      "existing_acroform",
-      "cv_contour",
-      "ocr_region",
-      "manual",
-    ])
-    .default("manual"),
+  detectionSource: DetectionSourceSchema.default("manual"),
+  detectionSources: z
+    .array(DetectionSourceSchema)
+    .nullish()
+    .transform((v) => v ?? undefined),
   confidence: z.number().min(0).max(1),
   confidenceTier: z.enum(["high", "medium", "low"]),
   confidenceEvidence: z
@@ -154,6 +180,11 @@ export const DetectedFormFieldSchema = z.object({
     .nullish()
     .transform((v) => v ?? undefined),
   reviewStatus: z.enum(["pending", "accepted", "edited", "rejected"]).default("pending"),
+  reviewFlagReason: z
+    .string()
+    .max(300)
+    .nullish()
+    .transform((v) => v ?? undefined),
   createdAt: z
     .string()
     .nullish()

@@ -10,6 +10,7 @@ export type FormForgeFieldType =
   | "checkbox"
   | "radio"
   | "dropdown"
+  | "listbox"
   | "signature"
   | "initials"
   | "table_cell"
@@ -19,15 +20,21 @@ export type FormForgeFieldType =
 export type ConfidenceTier = "high" | "medium" | "low";
 export type ReviewStatus = "pending" | "accepted" | "edited" | "rejected";
 export type DetectionSource =
+  | "pdf_structural"
   | "vector_underline"
   | "vector_box"
   | "vector_char_cells"
+  | "vector_comb_grid"
   | "vector_checkbox"
   | "vector_radio"
+  | "glyph_symbol"
   | "table_cell"
   | "existing_acroform"
   | "cv_contour"
+  | "cv_circle"
   | "ocr_region"
+  | "paddleocr"
+  | "ai_semantic_fusion"
   | "manual";
 
 export interface PdfRect {
@@ -42,6 +49,15 @@ export interface PdfPageBox {
   y: number;
   width: number;
   height: number;
+}
+
+export interface CharGridMetadata {
+  cellCount: number;
+  cellWidthPt: number;
+  cellHeightPt: number;
+  spacingPt: number;
+  readingDirection: "ltr" | "rtl";
+  acroformStrategy: "comb" | "individual_cells";
 }
 
 export interface DocumentPageInfo {
@@ -78,13 +94,21 @@ export interface DetectedFormField {
   type: FormForgeFieldType;
   page: number;
   rect: PdfRect;
+  /** Original raw detected bounding box before clamping/snapping */
+  originalDetectedRect?: PdfRect;
+  /** Final PDF user-space [x0, y0, x1, y1] bottom-left coordinates */
+  pdfBottomLeftRect?: [number, number, number, number];
   /** Optional individual character-cell bounding boxes in PDF points when type === "char_cells" */
   cellRects?: PdfRect[];
+  /** Metadata describing detected character-entry grid geometry and AcroForm strategy */
+  charGridMeta?: CharGridMetadata;
   /** Optional per-option bounding boxes in PDF points for radio/selection groups */
   optionRects?: Record<string, PdfRect>;
   coordinateSpace: "top_left_pdf_pt";
   originalLabelText: string;
   detectionSource: DetectionSource;
+  /** All contributing detection engines/sources merged by the fusion stage */
+  detectionSources?: DetectionSource[];
   confidence: number;
   confidenceTier: ConfidenceTier;
   confidenceEvidence: string[];
@@ -101,8 +125,25 @@ export interface DetectedFormField {
   fontSize?: number;
   alignment?: "left" | "center" | "right";
   reviewStatus: ReviewStatus;
+  /** Explicit flag reason when a low-confidence or ambiguous detection requires review */
+  reviewFlagReason?: string;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface DetectionSummary {
+  totalDetectedFields: number;
+  countsByType: Record<string, number>;
+  countsBySource: Record<string, number>;
+  confidenceBreakdown: {
+    high: number;
+    medium: number;
+    low: number;
+  };
+  reviewRecommendedCount: number;
+  charGridGroupCount: number;
+  combFieldCount: number;
+  engineMode: "python_multi_engine" | "node_vector_fusion";
 }
 
 export interface FieldManifest {
@@ -112,6 +153,7 @@ export interface FieldManifest {
   totalPages: number;
   pages: DocumentPageInfo[];
   fields: DetectedFormField[];
+  detectionSummary?: DetectionSummary;
   generatedAt: string;
   engineVersion: string;
   hasExistingAcroForm: boolean;
@@ -149,6 +191,40 @@ export type JobStage =
   | "completed"
   | "failed";
 
+export interface VisualAlignmentIssue {
+  fieldId: string;
+  fieldName: string;
+  page: number;
+  issue: "misplaced" | "oversized" | "undersized" | "missing";
+  iou: number;
+  areaRatio: number;
+  centerOffsetPt: number;
+  detail: string;
+}
+
+export interface VisualOverlapWarning {
+  fieldA: string;
+  fieldB: string;
+  page: number;
+  iou: number;
+}
+
+export interface VisualVerificationReport {
+  checkedWidgets: number;
+  alignedCount: number;
+  meanIoU: number;
+  minIoU: number;
+  combFieldCount: number;
+  misplacedFields: VisualAlignmentIssue[];
+  oversizedFields: VisualAlignmentIssue[];
+  undersizedFields: VisualAlignmentIssue[];
+  missingFields: string[];
+  overlappingWidgetPairs: VisualOverlapWarning[];
+  duplicateWidgetNames: string[];
+  passed: boolean;
+  summary: string;
+}
+
 export interface AcroFormValidationReport {
   validPdf: boolean;
   hasAcroFormDict: boolean;
@@ -159,4 +235,5 @@ export interface AcroFormValidationReport {
   roundTripWriteReadOk: boolean;
   pageCount: number;
   warnings: string[];
+  visualVerification?: VisualVerificationReport;
 }
