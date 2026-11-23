@@ -1150,7 +1150,191 @@ function inspectCellCaptionAndWritableArea(
  * Fuse PDF structural primitives, vector lines/boxes/circles, glyph cues,
  * OCR labels, CV detections, and existing AcroForm widgets into classified DetectedFormFields.
  */
+function scaleRectObj(r: PdfRect, k: number): PdfRect {
+  return {
+    x: roundPt(r.x * k),
+    y: roundPt(r.y * k),
+    width: roundPt(r.width * k),
+    height: roundPt(r.height * k),
+  };
+}
+
 export function fuseAndClassifyPageGeometry(params: {
+  geom: PageStructuralGeometry;
+  pageBox: PdfPageBox;
+  rotation: 0 | 90 | 180 | 270;
+  existingWidgets: Array<{
+    name: string;
+    type: FormForgeFieldType;
+    rect: PdfRect;
+    defaultValue?: string;
+    maxLength?: number;
+    options?: string[];
+  }>;
+  extraLabels?: MergedTextLabel[];
+  extraCandidates?: RawCandidate[];
+  uniqueName: (raw: string) => string;
+}): DetectedFormField[] {
+  const rawW = params.geom.pageWidthPt;
+  const rawH = params.geom.pageHeightPt;
+  const minDim = Math.min(rawW, rawH);
+
+  const textHeights = [
+    ...params.geom.textRuns.map((t) => t.y1 - t.y0),
+    ...(params.extraLabels ?? []).map((l) => l.y1 - l.y0),
+  ]
+    .filter((h) => h > 2)
+    .sort((a, b) => a - b);
+  const medTextH =
+    textHeights.length > 0 ? textHeights[Math.floor(textHeights.length / 2)] : 0;
+
+  // Normalize raw-pixel-unit scanner MediaBoxes (e.g. 1800x2545pt) into canonical ~595pt space
+  const normScale =
+    minDim > 950 && (medTextH > 14 || textHeights.length === 0)
+      ? minDim / 595.28
+      : 1;
+
+  if (normScale <= 1.05) {
+    return fuseAndClassifyPageGeometryCore(params);
+  }
+
+  const inv = 1 / normScale;
+  const scaledGeom: PageStructuralGeometry = {
+    ...params.geom,
+    pageWidthPt: params.geom.pageWidthPt * inv,
+    pageHeightPt: params.geom.pageHeightPt * inv,
+    hLines: params.geom.hLines.map((l) => ({
+      ...l,
+      x0: l.x0 * inv,
+      y0: l.y0 * inv,
+      x1: l.x1 * inv,
+      y1: l.y1 * inv,
+      thickness: l.thickness * inv,
+    })),
+    vLines: params.geom.vLines.map((l) => ({
+      ...l,
+      x0: l.x0 * inv,
+      y0: l.y0 * inv,
+      x1: l.x1 * inv,
+      y1: l.y1 * inv,
+      thickness: l.thickness * inv,
+    })),
+    rects: params.geom.rects.map((r) => ({
+      ...r,
+      x0: r.x0 * inv,
+      y0: r.y0 * inv,
+      x1: r.x1 * inv,
+      y1: r.y1 * inv,
+      width: r.width * inv,
+      height: r.height * inv,
+    })),
+    circles: params.geom.circles.map((c) => ({
+      ...c,
+      cx: c.cx * inv,
+      cy: c.cy * inv,
+      r: c.r * inv,
+      x0: c.x0 * inv,
+      y0: c.y0 * inv,
+      x1: c.x1 * inv,
+      y1: c.y1 * inv,
+    })),
+    textRuns: params.geom.textRuns.map((t) => ({
+      ...t,
+      x0: t.x0 * inv,
+      y0: t.y0 * inv,
+      x1: t.x1 * inv,
+      y1: t.y1 * inv,
+      fontSize: t.fontSize * inv,
+    })),
+    imageRegions: params.geom.imageRegions.map((im) => ({
+      ...im,
+      x0: im.x0 * inv,
+      y0: im.y0 * inv,
+      x1: im.x1 * inv,
+      y1: im.y1 * inv,
+      width: im.width * inv,
+      height: im.height * inv,
+    })),
+  };
+
+  const scaledExtraLabels = (params.extraLabels ?? []).map((l) => ({
+    ...l,
+    x0: l.x0 * inv,
+    y0: l.y0 * inv,
+    x1: l.x1 * inv,
+    y1: l.y1 * inv,
+    fontSize: l.fontSize * inv,
+  }));
+
+  const scaledExisting = params.existingWidgets.map((w) => ({
+    ...w,
+    rect: scaleRectObj(w.rect, inv),
+  }));
+
+  const scaledExtraCandidates = (params.extraCandidates ?? []).map((c) => ({
+    ...c,
+    x0: c.x0 * inv,
+    y0: c.y0 * inv,
+    x1: c.x1 * inv,
+    y1: c.y1 * inv,
+    cellRects: c.cellRects?.map((cr) => scaleRectObj(cr, inv)),
+    optionRects: c.optionRects
+      ? Object.fromEntries(
+          Object.entries(c.optionRects).map(([k, v]) => [k, scaleRectObj(v, inv)])
+        )
+      : undefined,
+  }));
+
+  const normFields = fuseAndClassifyPageGeometryCore({
+    ...params,
+    geom: scaledGeom,
+    pageBox: {
+      x: params.pageBox.x * inv,
+      y: params.pageBox.y * inv,
+      width: params.pageBox.width * inv,
+      height: params.pageBox.height * inv,
+    },
+    existingWidgets: scaledExisting,
+    extraLabels: scaledExtraLabels,
+    extraCandidates: scaledExtraCandidates,
+  });
+
+  return normFields.map((f) => {
+    const origRect = f.originalDetectedRect
+      ? scaleRectObj(f.originalDetectedRect, normScale)
+      : undefined;
+    const rect = clampPdfRect(scaleRectObj(f.rect, normScale), rawW, rawH);
+    const cellRects = f.cellRects?.map((cr) => scaleRectObj(cr, normScale));
+    const optionRects = f.optionRects
+      ? Object.fromEntries(
+          Object.entries(f.optionRects).map(([k, v]) => [
+            k,
+            clampPdfRect(scaleRectObj(v, normScale), rawW, rawH),
+          ])
+        )
+      : undefined;
+    const charGridMeta = f.charGridMeta
+      ? {
+          ...f.charGridMeta,
+          cellWidthPt: roundPt(f.charGridMeta.cellWidthPt * normScale),
+          cellHeightPt: roundPt(f.charGridMeta.cellHeightPt * normScale),
+          spacingPt: roundPt(f.charGridMeta.spacingPt * normScale),
+        }
+      : undefined;
+
+    return {
+      ...f,
+      originalDetectedRect: origRect,
+      rect,
+      pdfBottomLeftRect: topLeftPdfToBottomLeftPdf(rect, params.pageBox, params.rotation),
+      cellRects,
+      optionRects,
+      charGridMeta,
+    };
+  });
+}
+
+function fuseAndClassifyPageGeometryCore(params: {
   geom: PageStructuralGeometry;
   pageBox: PdfPageBox;
   rotation: 0 | 90 | 180 | 270;
@@ -1272,6 +1456,30 @@ export function fuseAndClassifyPageGeometry(params: {
     });
   };
 
+  const isGlyphCounterInsideTextRun = (
+    bx0: number,
+    by0: number,
+    bx1: number,
+    by1: number
+  ): boolean => {
+    const bw = bx1 - bx0;
+    const bh = by1 - by0;
+    if (bw > 34 || bh > 34) return false;
+    const bArea = Math.max(1, bw * bh);
+    return geom.textRuns.some((tr) => {
+      if (tr.isCheckboxGlyph || tr.isRadioGlyph || !/[A-Za-z0-9]/.test(tr.text)) {
+        return false;
+      }
+      const th = tr.y1 - tr.y0;
+      const tw = tr.x1 - tr.x0;
+      if (bh > th * 1.38 || bw > Math.max(th * 1.45, tw * 0.9)) {
+        return false;
+      }
+      const ov = overlapArea([bx0, by0, bx1, by1], [tr.x0, tr.y0, tr.x1, tr.y1]);
+      return ov >= bArea * 0.45;
+    });
+  };
+
   const consumedOptionLabels = new Set<MergedTextLabel>();
   const emptySmallBoxes: typeof combinedCells = [];
   const optionLabeledBoxes: Array<{
@@ -1289,6 +1497,7 @@ export function fuseAndClassifyPageGeometry(params: {
     const ch = cell.y1 - cell.y0;
     const cArea = cw * ch;
     if (cw < 6.5 || ch < 6.5) continue;
+    if (isGlyphCounterInsideTextRun(cell.x0, cell.y0, cell.x1, cell.y1)) continue;
 
     // Skip cells that sit inside shaded section headers
     const insideShaded = shadedRects.some(
@@ -1407,6 +1616,7 @@ export function fuseAndClassifyPageGeometry(params: {
   }> = [];
 
   for (const c of geom.circles) {
+    if (isGlyphCounterInsideTextRun(c.x0, c.y0, c.x1, c.y1)) continue;
     const lblMatch = findBestAssociatedLabel([c.x0, c.y0, c.x1, c.y1], labels, true);
     radioCandidateNodes.push({
       x0: c.x0,

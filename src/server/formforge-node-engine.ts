@@ -43,7 +43,11 @@ import {
   snakeCase,
 } from "./formforge-fusion.ts";
 import { createLocalOcrSession, type LocalOcrSession } from "./pdf-local-ocr.ts";
-import { renderPageThumbnails, runRasterCvOnPdfPage } from "./pdf-raster-cv.ts";
+import {
+  getPdfJsDocumentOptions,
+  renderPageThumbnails,
+  runRasterCvOnPdfPage,
+} from "./pdf-raster-cv.ts";
 import { extractPageStructuralGeometry } from "./pdf-vector-extractor.ts";
 
 // Configure worker path for Node.js pdfjs-dist usage
@@ -124,11 +128,9 @@ async function loadPdfDocument(pdfPath: string): Promise<{
     throw new Error("INVALID_PAGE_COUNT: PDF contains zero pages");
   }
 
-  const loadingTask = pdfjsLib.getDocument({
-    data: new Uint8Array(bytes),
-    verbosity: 0,
-    useSystemFonts: true,
-  });
+  const loadingTask = pdfjsLib.getDocument(
+    getPdfJsDocumentOptions(new Uint8Array(bytes))
+  );
   const pdfjsDoc = await loadingTask.promise;
 
   return { bytes, pdfDoc, pdfjsDoc };
@@ -414,7 +416,8 @@ async function analyzePdfNode(
           pIdx,
           geom.pageWidthPt,
           geom.pageHeightPt,
-          ocrDpi
+          ocrDpi,
+          jsPage
         );
 
         if (!ocrSession) {
@@ -422,7 +425,7 @@ async function analyzePdfNode(
         }
         const ocrOut = await ocrSession.recognizePage(
           cvRes.bmpBuffer,
-          ocrDpi,
+          cvRes.dpi,
           geom.pageWidthPt,
           geom.pageHeightPt
         );
@@ -458,7 +461,7 @@ async function analyzePdfNode(
           pageIndex: pIdx,
           ocrEngine: "tesseract",
           language: ocrOut.language,
-          dpi: ocrDpi,
+          dpi: Math.round(cvRes.dpi),
           deskewAngle: cvRes.deskewAngle,
           wordCount: ocrOut.wordCount,
           extractedChars: ocrOut.extractedChars,

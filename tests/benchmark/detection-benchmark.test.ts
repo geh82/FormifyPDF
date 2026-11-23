@@ -1,13 +1,13 @@
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { computeRectIoU } from "../../src/lib/formforge/coordinate.ts";
 import type { AcroFormValidationReport, DetectedFormField, FieldManifest, PdfRect } from "../../src/lib/formforge/types.ts";
 import { runFormForgeNodeEngine } from "../../src/server/formforge-node-engine.ts";
-import { getGsFontmapArgs } from "../../src/server/pdf-raster-cv.ts";
+import { renderPdfPagePngBuffer } from "../../src/server/pdf-raster-cv.ts";
 
 interface BenchmarkTarget {
   name: string;
@@ -174,22 +174,10 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
 
   it("Scenario 2: Scanned image-only PDF triggers offline CV + Tesseract OCR and achieves >=90% recall", async () => {
     const alvPdf = path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf");
-    const imgPath = path.join(tmpDir, "alv_p1_scan.png");
-    execFileSync("gs", [
-      "-q",
-      "-dNOPAUSE",
-      "-dBATCH",
-      "-dSAFER",
-      "-sDEVICE=pnggray",
-      "-r160",
-      "-dFirstPage=1",
-      "-dLastPage=1",
-      `-sOutputFile=${imgPath}`,
-      alvPdf,
-    ]);
+    const { png } = await renderPdfPagePngBuffer(alvPdf, 0, 160);
 
     const scanDoc = await PDFDocument.create();
-    const pngImg = await scanDoc.embedPng(fs.readFileSync(imgPath));
+    const pngImg = await scanDoc.embedPng(png);
     const page = scanDoc.addPage([595.28, 841.89]);
     page.drawImage(pngImg, { x: 0, y: 0, width: 595.28, height: 841.89 });
     const scanPdf = path.join(tmpDir, "alv_p1_scanned.pdf");
@@ -245,36 +233,19 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
     const flatPdf = path.join(tmpDir, "skew_src.pdf");
     fs.writeFileSync(flatPdf, Buffer.from(await srcDoc.save()));
 
-    const pngOrig = path.join(tmpDir, "skew_orig.png");
-    const pngSkew = path.join(tmpDir, "skew_rot.png");
-    execFileSync("gs", [
-      "-q",
-      ...getGsFontmapArgs(),
-      "-dNOPAUSE",
-      "-dBATCH",
-      "-dSAFER",
-      "-sDEVICE=png16m",
-      "-r150",
-      `-sOutputFile=${pngOrig}`,
-      flatPdf,
-    ]);
-    execFileSync("convert", [
-      pngOrig,
-      "-background",
-      "white",
-      "-rotate",
-      "2.1",
-      "+repage",
-      "-gravity",
-      "center",
-      "-extent",
-      "1240x1754",
-      "+repage",
-      `PNG24:${pngSkew}`,
-    ]);
+    const { png: origPng, width: imgW, height: imgH } = await renderPdfPagePngBuffer(flatPdf, 0, 150);
+    const loadedImg = await loadImage(origPng);
+    const rotCanvas = createCanvas(imgW, imgH);
+    const rctx = rotCanvas.getContext("2d");
+    rctx.fillStyle = "#ffffff";
+    rctx.fillRect(0, 0, imgW, imgH);
+    rctx.translate(imgW / 2, imgH / 2);
+    rctx.rotate((2.1 * Math.PI) / 180);
+    rctx.drawImage(loadedImg, -imgW / 2, -imgH / 2);
+    const skewedPng = rotCanvas.toBuffer("image/png");
 
     const skewedPdfDoc = await PDFDocument.create();
-    const img = await skewedPdfDoc.embedPng(fs.readFileSync(pngSkew));
+    const img = await skewedPdfDoc.embedPng(skewedPng);
     const sp = skewedPdfDoc.addPage([595.28, 841.89]);
     sp.drawImage(img, { x: 0, y: 0, width: 595.28, height: 841.89 });
     const skewedPdf = path.join(tmpDir, "skewed_scan.pdf");

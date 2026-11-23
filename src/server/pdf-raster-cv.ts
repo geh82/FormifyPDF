@@ -1,8 +1,8 @@
-import { execFile } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
+import { createCanvas, DOMMatrix, Path2D } from "@napi-rs/canvas";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import { imagePxToTopLeftPdf, roundPt } from "../lib/formforge/coordinate.ts";
 import type {
   ExtractedCirclePrimitive,
@@ -10,90 +10,42 @@ import type {
   ExtractedRectPrimitive,
 } from "./pdf-vector-extractor.ts";
 
-const execFileAsync = promisify(execFile);
+// Ensure Canvas 2D geometry globals exist in Node.js for pdfjs-dist rendering
+if (!globalThis.DOMMatrix) {
+  (globalThis as unknown as { DOMMatrix: typeof DOMMatrix }).DOMMatrix = DOMMatrix;
+}
+if (!globalThis.Path2D) {
+  (globalThis as unknown as { Path2D: typeof Path2D }).Path2D = Path2D;
+}
 
-let cachedGsFontmapDir: string | null = null;
+const pdfjsWorkerPath = path.resolve(
+  process.cwd(),
+  "node_modules",
+  "pdfjs-dist",
+  "legacy",
+  "build",
+  "pdf.worker.mjs"
+);
+if (pdfjsLib.GlobalWorkerOptions && fs.existsSync(pdfjsWorkerPath)) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = pathToFileURL(pdfjsWorkerPath).href;
+}
 
-/**
- * Locate installed TrueType system fonts and build a minimal Ghostscript Fontmap.GS
- * so Ghostscript 9.x renders PDFs with unembedded Standard14 fonts (Helvetica, Times, Courier)
- * cleanly even on minimal Linux containers without URW Type1 font packs.
- */
-export function getGsFontmapArgs(): string[] {
-  if (cachedGsFontmapDir && fs.existsSync(path.join(cachedGsFontmapDir, "Fontmap.GS"))) {
-    return [`-I${cachedGsFontmapDir}`];
-  }
+export function getPdfJsDocumentOptions(bytes: Uint8Array) {
+  const stdFontsDir = path.resolve(process.cwd(), "node_modules", "pdfjs-dist", "standard_fonts");
+  const cmapsDir = path.resolve(process.cwd(), "node_modules", "pdfjs-dist", "cmaps");
+  const iccsDir = path.resolve(process.cwd(), "node_modules", "pdfjs-dist", "iccs");
 
-  const pickFirst = (candidates: string[]): string | null =>
-    candidates.find((p) => fs.existsSync(p)) ?? null;
+  const toTrailingUrl = (dir: string) =>
+    fs.existsSync(dir) ? `${pathToFileURL(dir).href.replace(/\/+$/, "")}/` : undefined;
 
-  const sansReg = pickFirst([
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-  ]);
-  const sansBold = pickFirst([
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    sansReg ?? "",
-  ]);
-  const sansItal = pickFirst([
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
-    sansReg ?? "",
-  ]);
-  const sansBoldItal = pickFirst([
-    "/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf",
-    sansBold ?? "",
-  ]);
-  const serifReg = pickFirst([
-    "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
-    sansReg ?? "",
-  ]);
-  const serifBold = pickFirst([
-    "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
-    sansBold ?? "",
-  ]);
-  const monoReg = pickFirst([
-    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    sansReg ?? "",
-  ]);
-  const monoBold = pickFirst([
-    "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
-    sansBold ?? "",
-  ]);
-
-  if (!sansReg) return [];
-
-  const entries: Array<[string, string | null]> = [
-    ["Helvetica", sansReg],
-    ["Helvetica-Bold", sansBold],
-    ["Helvetica-Oblique", sansItal],
-    ["Helvetica-BoldOblique", sansBoldItal],
-    ["NimbusSans-Regular", sansReg],
-    ["NimbusSans-Bold", sansBold],
-    ["NimbusSans-Italic", sansItal],
-    ["NimbusSans-BoldItalic", sansBoldItal],
-    ["Times-Roman", serifReg],
-    ["Times-Bold", serifBold],
-    ["NimbusRoman-Regular", serifReg],
-    ["NimbusRoman-Bold", serifBold],
-    ["Courier", monoReg],
-    ["Courier-Bold", monoBold],
-    ["NimbusMonoPS-Regular", monoReg],
-    ["NimbusMonoPS-Bold", monoBold],
-  ];
-
-  const dir = path.join(os.tmpdir(), "formforge-gs-fontmap");
-  fs.mkdirSync(dir, { recursive: true });
-  const lines = entries
-    .filter((entry): entry is [string, string] => Boolean(entry[1]))
-    .map(([name, fontPath]) => `/${name} (${fontPath}) ;`);
-  fs.writeFileSync(path.join(dir, "Fontmap.GS"), `${lines.join("\n")}\n`, "utf-8");
-  cachedGsFontmapDir = dir;
-  return [`-I${dir}`];
+  return {
+    data: bytes,
+    verbosity: 0,
+    useSystemFonts: true,
+    ...(toTrailingUrl(stdFontsDir) ? { standardFontDataUrl: toTrailingUrl(stdFontsDir) } : {}),
+    ...(toTrailingUrl(cmapsDir) ? { cMapUrl: toTrailingUrl(cmapsDir), cMapPacked: true } : {}),
+    ...(toTrailingUrl(iccsDir) ? { iccUrl: toTrailingUrl(iccsDir) } : {}),
+  };
 }
 
 export interface RasterPageImage {
@@ -112,6 +64,7 @@ export interface RasterCvExtractionResult {
   bmpBuffer: Buffer;
   width: number;
   height: number;
+  dpi: number;
 }
 
 /**
@@ -220,43 +173,98 @@ export function encodeGrayToBmpBuffer(
 }
 
 /**
- * Render a single PDF page to a grayscale raster via Ghostscript.
+ * Render an already-loaded pdfjs page to a white-backed @napi-rs/canvas at `dpi`
+ * (automatically clamping oversized MediaBox scans so max dimension <= 2600px).
+ */
+async function renderPdfJsPageToCanvas(
+  jsPage: pdfjsLib.PDFPageProxy,
+  dpi: number,
+  maxDimPx = 2600
+) {
+  const baseVp = jsPage.getViewport({ scale: 1 });
+  const rawMaxPx = Math.max(baseVp.width, baseVp.height) * (dpi / 72.0);
+  const effectiveDpi =
+    rawMaxPx > maxDimPx
+      ? Math.max(36, (dpi * maxDimPx) / rawMaxPx)
+      : dpi;
+  const scale = effectiveDpi / 72.0;
+  const viewport = jsPage.getViewport({ scale });
+  const width = Math.max(1, Math.round(viewport.width));
+  const height = Math.max(1, Math.round(viewport.height));
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext("2d");
+
+  // Solid white paper background before rendering transparent PDF streams
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  await jsPage.render({
+    canvasContext: ctx as unknown as CanvasRenderingContext2D,
+    viewport,
+    canvas: canvas as unknown as HTMLCanvasElement,
+  }).promise;
+
+  return { canvas, ctx, width, height, effectiveDpi };
+}
+
+/**
+ * Render an already-loaded pdfjs page to 8-bit luminance grayscale in-process (zero CLI dependencies).
+ */
+export async function renderPdfJsPageGray(
+  jsPage: pdfjsLib.PDFPageProxy,
+  dpi = 180
+): Promise<RasterPageImage> {
+  const { ctx, width, height, effectiveDpi } = await renderPdfJsPageToCanvas(jsPage, dpi);
+  const rgba = ctx.getImageData(0, 0, width, height).data;
+  const pixelCount = width * height;
+  const gray = new Uint8Array(pixelCount);
+
+  for (let i = 0; i < pixelCount; i++) {
+    const p = i * 4;
+    gray[i] = Math.round(0.299 * rgba[p] + 0.587 * rgba[p + 1] + 0.114 * rgba[p + 2]);
+  }
+  return { width, height, dpi: effectiveDpi, gray };
+}
+
+/**
+ * Render a single PDF page to a grayscale raster in pure Node.js (pdfjs-dist + @napi-rs/canvas).
  */
 export async function renderPdfPageGray(
   pdfPath: string,
   pageIndex: number,
   dpi = 180
 ): Promise<RasterPageImage> {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "formforge-gs-"));
-  const outPgm = path.join(tmpDir, `page_${pageIndex + 1}.pgm`);
+  const bytes = new Uint8Array(fs.readFileSync(pdfPath));
+  const pdfjsDoc = await pdfjsLib.getDocument(getPdfJsDocumentOptions(bytes)).promise;
   try {
-    await execFileAsync(
-      "gs",
-      [
-        "-q",
-        ...getGsFontmapArgs(),
-        "-dNOPAUSE",
-        "-dBATCH",
-        "-dSAFER",
-        "-sDEVICE=pgmraw",
-        `-r${dpi}`,
-        `-dFirstPage=${pageIndex + 1}`,
-        `-dLastPage=${pageIndex + 1}`,
-        `-sOutputFile=${outPgm}`,
-        pdfPath,
-      ],
-      { timeout: 30000 }
-    );
-    const raw = fs.readFileSync(outPgm);
-    const { width, height, gray } = parsePgmBuffer(raw);
-    return { width, height, dpi, gray };
+    const page = await pdfjsDoc.getPage(pageIndex + 1);
+    return await renderPdfJsPageGray(page, dpi);
   } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    await pdfjsDoc.cleanup();
   }
 }
 
 /**
- * Render PNG thumbnails for all pages of a PDF into `outDir`.
+ * Render a PDF page directly to an in-memory PNG Buffer (used for thumbnails and diagnostics).
+ */
+export async function renderPdfPagePngBuffer(
+  pdfPath: string,
+  pageIndex: number,
+  dpi = 150
+): Promise<{ png: Buffer; width: number; height: number }> {
+  const bytes = new Uint8Array(fs.readFileSync(pdfPath));
+  const pdfjsDoc = await pdfjsLib.getDocument(getPdfJsDocumentOptions(bytes)).promise;
+  try {
+    const page = await pdfjsDoc.getPage(pageIndex + 1);
+    const { canvas, width, height } = await renderPdfJsPageToCanvas(page, dpi);
+    return { png: canvas.toBuffer("image/png"), width, height };
+  } finally {
+    await pdfjsDoc.cleanup();
+  }
+}
+
+/**
+ * Render PNG thumbnails for all pages of a PDF into `outDir` using in-process Node rendering.
  */
 export async function renderPageThumbnails(
   pdfPath: string,
@@ -265,32 +273,26 @@ export async function renderPageThumbnails(
   dpi = 100
 ): Promise<Array<string | null>> {
   const results = new Array<string | null>(pageCount).fill(null);
+  let pdfjsDoc: pdfjsLib.PDFDocumentProxy | null = null;
   try {
     fs.mkdirSync(outDir, { recursive: true });
-    const pattern = path.join(outDir, "page_%03d.png");
-    await execFileAsync(
-      "gs",
-      [
-        "-q",
-        ...getGsFontmapArgs(),
-        "-dNOPAUSE",
-        "-dBATCH",
-        "-dSAFER",
-        "-sDEVICE=png16m",
-        `-r${dpi}`,
-        `-sOutputFile=${pattern}`,
-        pdfPath,
-      ],
-      { timeout: 45000 }
-    );
-    for (let i = 0; i < pageCount; i++) {
+    const bytes = new Uint8Array(fs.readFileSync(pdfPath));
+    pdfjsDoc = await pdfjsLib.getDocument(getPdfJsDocumentOptions(bytes)).promise;
+
+    const total = Math.min(pageCount, pdfjsDoc.numPages);
+    for (let i = 0; i < total; i++) {
+      const page = await pdfjsDoc.getPage(i + 1);
+      const { canvas } = await renderPdfJsPageToCanvas(page, dpi);
       const name = `page_${String(i + 1).padStart(3, "0")}.png`;
-      if (fs.existsSync(path.join(outDir, name))) {
-        results[i] = name;
-      }
+      fs.writeFileSync(path.join(outDir, name), canvas.toBuffer("image/png"));
+      results[i] = name;
     }
   } catch {
     // Non-fatal: thumbnails are optional visual aids
+  } finally {
+    if (pdfjsDoc) {
+      await pdfjsDoc.cleanup().catch(() => {});
+    }
   }
   return results;
 }
@@ -957,7 +959,7 @@ export function extractCvGeometryFromRaster(
 }
 
 /**
- * Full per-page raster CV preprocessing pipeline: render via Ghostscript,
+ * Full per-page raster CV preprocessing pipeline: render in-process via pdfjs-dist + @napi-rs/canvas,
  * binarize & denoise, deskew if rotated, extract CV geometry, and encode BMP for OCR.
  */
 export async function runRasterCvOnPdfPage(
@@ -965,14 +967,18 @@ export async function runRasterCvOnPdfPage(
   pageIndex: number,
   pageWidthPt: number,
   pageHeightPt: number,
-  dpi = 180
+  dpi = 180,
+  existingJsPage?: pdfjsLib.PDFPageProxy
 ): Promise<RasterCvExtractionResult> {
-  const rendered = await renderPdfPageGray(pdfPath, pageIndex, dpi);
+  const rendered = existingJsPage
+    ? await renderPdfJsPageGray(existingJsPage, dpi)
+    : await renderPdfPageGray(pdfPath, pageIndex, dpi);
+  const effDpi = rendered.dpi;
   const initialBin = binarizeAndDenoise(
     rendered.gray,
     rendered.width,
     rendered.height,
-    dpi
+    effDpi
   );
   const { deskewAngle, gray, binary } = estimateAndDeskew(
     rendered.gray,
@@ -986,7 +992,7 @@ export async function runRasterCvOnPdfPage(
     binary,
     rendered.width,
     rendered.height,
-    dpi,
+    effDpi,
     pageWidthPt,
     pageHeightPt
   );
@@ -999,5 +1005,6 @@ export async function runRasterCvOnPdfPage(
     bmpBuffer,
     width: rendered.width,
     height: rendered.height,
+    dpi: effDpi,
   };
 }
