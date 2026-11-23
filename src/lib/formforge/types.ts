@@ -143,7 +143,7 @@ export interface DetectionSummary {
   reviewRecommendedCount: number;
   charGridGroupCount: number;
   combFieldCount: number;
-  engineMode: "python_multi_engine" | "node_vector_fusion";
+  engineMode: "python_multi_engine" | "node_vector_fusion" | "node_cv_ocr_fusion";
 }
 
 export interface FieldManifest {

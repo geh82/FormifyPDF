@@ -430,6 +430,42 @@ export function DocumentPreviewAndValidation({
                   {validation.roundTripWriteReadOk ? "Passed" : "Pending"}
                 </dd>
               </div>
+              {validation.visualVerification && (
+                <>
+                  <div className="py-2 flex items-center justify-between">
+                    <dt className="text-slate-600">Visual Widget Alignment</dt>
+                    <dd className="font-mono tabular-nums font-medium text-slate-900 inline-flex items-center gap-1">
+                      {validation.visualVerification.passed ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-700" />
+                      ) : (
+                        <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                      )}
+                      <span>
+                        {validation.visualVerification.alignedCount}/
+                        {validation.visualVerification.checkedWidgets} (mean IoU{" "}
+                        {validation.visualVerification.meanIoU.toFixed(2)})
+                      </span>
+                    </dd>
+                  </div>
+                  <div className="py-2 flex items-center justify-between">
+                    <dt className="text-slate-600">Comb Grids / Min IoU</dt>
+                    <dd className="font-mono tabular-nums font-medium text-slate-900">
+                      {validation.visualVerification.combFieldCount} comb · min{" "}
+                      {validation.visualVerification.minIoU.toFixed(2)}
+                    </dd>
+                  </div>
+                  {(validation.visualVerification.misplacedFields.length > 0 ||
+                    validation.visualVerification.oversizedFields.length > 0 ||
+                    validation.visualVerification.undersizedFields.length > 0 ||
+                    validation.visualVerification.overlappingWidgetPairs.length > 0 ||
+                    validation.visualVerification.duplicateWidgetNames.length > 0) && (
+                    <div className="py-2 text-[11px] text-amber-800 bg-amber-50 rounded px-2.5 mt-1 space-y-0.5">
+                      <p className="font-semibold">Visual Alignment Warnings</p>
+                      <p>{validation.visualVerification.summary}</p>
+                    </div>
+                  )}
+                </>
+              )}
             </dl>
           )}
 

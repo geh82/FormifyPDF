@@ -1251,6 +1251,55 @@ export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
                       </tbody>
                     </table>
                   </div>
+
+                  {docDetail.manifest?.detectionSummary && (
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+                      <div className="rounded-lg border border-slate-200 bg-white p-3.5">
+                        <p className="text-slate-500">Detected Fields</p>
+                        <p className="text-lg font-semibold text-slate-900 tabular-nums mt-0.5">
+                          {docDetail.manifest.detectionSummary.totalDetectedFields}
+                        </p>
+                        <p className="text-[11px] font-mono text-slate-500 mt-0.5">
+                          {docDetail.manifest.detectionSummary.engineMode}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-white p-3.5">
+                        <p className="text-slate-500">Character Grids / Comb</p>
+                        <p className="text-lg font-semibold text-slate-900 tabular-nums mt-0.5">
+                          {docDetail.manifest.detectionSummary.charGridGroupCount} grids ·{" "}
+                          {docDetail.manifest.detectionSummary.combFieldCount} comb
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          Native AcroForm Comb preserved
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-white p-3.5">
+                        <p className="text-slate-500">Confidence Tiers</p>
+                        <p className="text-sm font-semibold text-slate-900 tabular-nums mt-1">
+                          {docDetail.manifest.detectionSummary.confidenceBreakdown.high} high ·{" "}
+                          {docDetail.manifest.detectionSummary.confidenceBreakdown.medium} med ·{" "}
+                          {docDetail.manifest.detectionSummary.confidenceBreakdown.low} low
+                        </p>
+                      </div>
+                      <div
+                        className={`rounded-lg border p-3.5 ${
+                          docDetail.manifest.detectionSummary.reviewRecommendedCount > 0
+                            ? "border-amber-200 bg-amber-50/70"
+                            : "border-emerald-200 bg-emerald-50/60"
+                        }`}
+                      >
+                        <p className="text-slate-700 font-medium">Review Queue</p>
+                        <p className="text-lg font-semibold text-slate-900 tabular-nums mt-0.5">
+                          {docDetail.manifest.detectionSummary.reviewRecommendedCount} flagged
+                        </p>
+                        <p className="text-[11px] text-slate-600 mt-0.5">
+                          {docDetail.manifest.detectionSummary.reviewRecommendedCount > 0
+                            ? "Open Edit Fields to confirm unlabeled or low-confidence items"
+                            : "All fields paired with printed labels"}
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
             </div>

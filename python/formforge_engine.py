@@ -714,11 +714,13 @@ def analyze_pdf(
                     }
                 )
 
-            # 2. Vector drawings inspection
+            # 2. Vector drawings inspection (rectangles + individual line-segment grids)
             small_boxes: List[Dict[str, Any]] = []
             checkbox_boxes: List[Dict[str, Any]] = []
             vector_boxes: List[Dict[str, Any]] = []
             vector_underlines: List[Dict[str, Any]] = []
+            raw_h_lines: List[Tuple[float, float, float]] = []
+            raw_v_lines: List[Tuple[float, float, float]] = []
 
             for d in page.get_drawings() or []:
                 items = d.get("items", [])
@@ -730,6 +732,14 @@ def analyze_pdf(
                 # Ignore full-page borders or tiny specks
                 if rw > page_w * 0.94 and rh > page_h * 0.94:
                     continue
+
+                for it in items:
+                    if it[0] == "l":
+                        p1, p2 = it[1], it[2]
+                        if abs(p1.y - p2.y) <= 1.6 and abs(p2.x - p1.x) >= 6.0:
+                            raw_h_lines.append((float(min(p1.x, p2.x)), float((p1.y + p2.y) / 2.0), float(max(p1.x, p2.x))))
+                        elif abs(p1.x - p2.x) <= 1.6 and abs(p2.y - p1.y) >= 5.0:
+                            raw_v_lines.append((float((p1.x + p2.x) / 2.0), float(min(p1.y, p2.y)), float(max(p1.y, p2.y))))
 
                 if len(items) == 1 and items[0][0] == "l":
                     p1, p2 = items[0][1], items[0][2]
@@ -747,7 +757,15 @@ def analyze_pdf(
                                 "source": "vector_underline",
                             }
                         )
+                elif rh <= 3.2 and rw >= 6.0:
+                    raw_h_lines.append((float(rect.x0), float((rect.y0 + rect.y1) / 2.0), float(rect.x1)))
+                elif rw <= 3.2 and rh >= 5.0:
+                    raw_v_lines.append((float((rect.x0 + rect.x1) / 2.0), float(rect.y0), float(rect.y1)))
                 elif (d.get("type") in ("s", "fs") or d.get("rect")) and rh >= 7.0 and rw >= 7.0:
+                    raw_h_lines.append((float(rect.x0), float(rect.y0), float(rect.x1)))
+                    raw_h_lines.append((float(rect.x0), float(rect.y1), float(rect.x1)))
+                    raw_v_lines.append((float(rect.x0), float(rect.y0), float(rect.y1)))
+                    raw_v_lines.append((float(rect.x1), float(rect.y0), float(rect.y1)))
                     if 7.5 <= rw <= 30.0 and 7.5 <= rh <= 34.0:
                         small_boxes.append(
                             {
@@ -770,6 +788,76 @@ def analyze_pdf(
                                 "source": "vector_box",
                             }
                         )
+
+            # Reconstruct closed grid cells from collinear horizontal & vertical segments
+            if raw_h_lines and raw_v_lines:
+                raw_h_lines.sort(key=lambda h: (round(h[1] / 1.5), h[0]))
+                merged_h: List[Tuple[float, float, float]] = []
+                for x0, y0, x1 in raw_h_lines:
+                    if merged_h and abs(merged_h[-1][1] - y0) <= 1.8 and x0 <= merged_h[-1][2] + 2.5:
+                        px0, py0, px1 = merged_h[-1]
+                        merged_h[-1] = (min(px0, x0), (py0 + y0) / 2.0, max(px1, x1))
+                    else:
+                        merged_h.append((x0, y0, x1))
+
+                raw_v_lines.sort(key=lambda v: (round(v[0] / 1.5), v[1]))
+                merged_v: List[Tuple[float, float, float]] = []
+                for x0, y0, y1 in raw_v_lines:
+                    if merged_v and abs(merged_v[-1][0] - x0) <= 1.8 and y0 <= merged_v[-1][2] + 2.5:
+                        px0, py0, py1 = merged_v[-1]
+                        merged_v[-1] = ((px0 + x0) / 2.0, min(py0, y0), max(py1, y1))
+                    else:
+                        merged_v.append((x0, y0, y1))
+
+                merged_h.sort(key=lambda h: (h[1], h[0]))
+                for idx_i, (tx0, ty0, tx1) in enumerate(merged_h):
+                    if tx1 - tx0 < 7.0:
+                        continue
+                    for bx0, by0, bx1 in merged_h[idx_i + 1 :]:
+                        ch = by0 - ty0
+                        if ch < 7.0:
+                            continue
+                        if ch > 220.0:
+                            break
+                        ox0, ox1 = max(tx0, bx0), min(tx1, bx1)
+                        if ox1 - ox0 < 7.0:
+                            continue
+                        cols = sorted({
+                            vx0
+                            for vx0, vy0, vy1 in merged_v
+                            if ox0 - 2.5 <= vx0 <= ox1 + 2.5 and vy0 <= ty0 + 3.0 and vy1 >= by0 - 3.0
+                        })
+                        dedup_cols: List[float] = []
+                        for c in cols:
+                            if not dedup_cols or c - dedup_cols[-1] > 2.2:
+                                dedup_cols.append(c)
+                        for c_idx in range(len(dedup_cols) - 1):
+                            cx0, cx1 = dedup_cols[c_idx], dedup_cols[c_idx + 1]
+                            cw = cx1 - cx0
+                            if cw < 7.0 or (cw > page_w * 0.94 and ch > page_h * 0.94):
+                                continue
+                            if 7.5 <= cw <= 30.0 and 7.5 <= ch <= 34.0:
+                                small_boxes.append(
+                                    {
+                                        "kind": "small_box",
+                                        "x0": float(cx0),
+                                        "y0": float(ty0),
+                                        "x1": float(cx1),
+                                        "y1": float(by0),
+                                        "source": "vector_char_cells",
+                                    }
+                                )
+                            elif cw >= 28.0 and 10.0 <= ch <= 160.0:
+                                vector_boxes.append(
+                                    {
+                                        "kind": "box",
+                                        "x0": float(cx0),
+                                        "y0": float(ty0),
+                                        "x1": float(cx1),
+                                        "y1": float(by0),
+                                        "source": "vector_box",
+                                    }
+                                )
 
             # 3. OCR & Computer Vision for scanned pages or explicit OCR request
             cv_candidates: List[Dict[str, Any]] = []

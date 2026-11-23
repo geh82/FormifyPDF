@@ -38,9 +38,12 @@ import type {
 } from "../lib/formforge/types.ts";
 import {
   buildDetectionSummary,
+  buildMergedTextLabels,
   fuseAndClassifyPageGeometry,
   snakeCase,
 } from "./formforge-fusion.ts";
+import { createLocalOcrSession, type LocalOcrSession } from "./pdf-local-ocr.ts";
+import { renderPageThumbnails, runRasterCvOnPdfPage } from "./pdf-raster-cv.ts";
 import { extractPageStructuralGeometry } from "./pdf-vector-extractor.ts";
 
 // Configure worker path for Node.js pdfjs-dist usage
@@ -87,6 +90,14 @@ function toWinAnsiSafeText(input: string): string {
     .replace(/[\u2013\u2014]/g, "-")
     .replace(/\u2026/g, "...")
     .replace(/[^\x20-\x7E\xA0-\xFF]/g, " ");
+}
+
+function makePdfLiteralString(input: string): PDFString {
+  const escaped = toWinAnsiSafeText(input)
+    .replace(/\\/g, "\\\\")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)");
+  return PDFString.of(escaped);
 }
 
 async function loadPdfDocument(pdfPath: string): Promise<{
@@ -262,12 +273,45 @@ async function analyzePdfNode(
   options: Record<string, unknown> = {}
 ) {
   const { pdfDoc, pdfjsDoc } = await loadPdfDocument(pdfPath);
+  const enableOcr = options.enableOcr !== false;
+  const forceOcr = Boolean(options.forceOcr);
+  const ocrLang = typeof options.ocrLanguage === "string" && options.ocrLanguage.trim()
+    ? options.ocrLanguage.trim()
+    : "eng";
+  const ocrDpi = Math.max(120, Math.min(300, Number(options.dpi || 180)));
+
+  let ocrSession: LocalOcrSession | null = null;
+  const ocrJobsReport: Array<{
+    pageIndex: number;
+    ocrEngine: string;
+    language: string;
+    dpi: number;
+    deskewAngle: number;
+    wordCount: number;
+    extractedChars: number;
+    durationMs: number;
+    status: string;
+  }> = [];
+
   try {
     const inspection = await inspectPdfNode(pdfPath);
+    if (typeof options.thumbnailsDir === "string" && options.thumbnailsDir.trim()) {
+      const thumbFiles = await renderPageThumbnails(
+        pdfPath,
+        options.thumbnailsDir.trim(),
+        inspection.pageCount,
+        100
+      );
+      for (let i = 0; i < inspection.pages.length; i++) {
+        inspection.pages[i].thumbnailFile = thumbFiles[i] ?? null;
+      }
+    }
+
     const form = pdfDoc.getForm();
     const existingFields = form.getFields();
     const allFields: DetectedFormField[] = [];
     const seenNames = new Set<string>();
+    let usedCvOrOcr = false;
 
     const uniqueName = (base: string): string => {
       const cleanBase = snakeCase(base, "field");
@@ -352,22 +396,90 @@ async function analyzePdfNode(
         existingOnPage.push(sig);
       }
 
-      // Extract full vector structural geometry + text + symbol glyphs via pdfjs-dist
+      // Extract vector structural geometry + text + symbol glyphs via pdfjs-dist
       const jsPage = await pdfjsDoc.getPage(pIdx + 1);
       const geom = await extractPageStructuralGeometry(jsPage, pIdx);
+
+      // Trigger local Raster Computer Vision + Tesseract OCR on scanned / image-based / forced pages
+      let extraLabels: ReturnType<typeof buildMergedTextLabels> = [];
+      const isImageHeavyLowVector =
+        geom.imageRegions.length > 0 && geom.drawingOpCount < 6 && pageInfo.wordCount < 15;
+      const shouldRunCvOcr =
+        enableOcr && (pageInfo.needsOcr || forceOcr || isImageHeavyLowVector);
+
+      if (shouldRunCvOcr) {
+        usedCvOrOcr = true;
+        const cvRes = await runRasterCvOnPdfPage(
+          pdfPath,
+          pIdx,
+          geom.pageWidthPt,
+          geom.pageHeightPt,
+          ocrDpi
+        );
+
+        if (!ocrSession) {
+          ocrSession = await createLocalOcrSession(ocrLang);
+        }
+        const ocrOut = await ocrSession.recognizePage(
+          cvRes.bmpBuffer,
+          ocrDpi,
+          geom.pageWidthPt,
+          geom.pageHeightPt
+        );
+
+        // Merge CV structural primitives into page geometry
+        geom.hLines.push(...cvRes.hLines);
+        geom.vLines.push(...cvRes.vLines);
+        geom.rects.push(...cvRes.rects);
+        geom.circles.push(...cvRes.circles);
+
+        if (geom.textRuns.length === 0) {
+          geom.textRuns.push(...ocrOut.textRuns);
+        } else {
+          extraLabels = buildMergedTextLabels(
+            ocrOut.textRuns,
+            geom.vLines,
+            geom.hLines,
+            "ocr_tesseract"
+          );
+        }
+
+        pageInfo.ocrApplied = true;
+        pageInfo.deskewAngle = cvRes.deskewAngle;
+        if (pageInfo.wordCount < ocrOut.wordCount) {
+          pageInfo.wordCount = ocrOut.wordCount;
+        }
+        pageInfo.drawingCount = Math.max(
+          pageInfo.drawingCount,
+          cvRes.hLines.length + cvRes.vLines.length + cvRes.rects.length
+        );
+
+        ocrJobsReport.push({
+          pageIndex: pIdx,
+          ocrEngine: "tesseract",
+          language: ocrOut.language,
+          dpi: ocrDpi,
+          deskewAngle: cvRes.deskewAngle,
+          wordCount: ocrOut.wordCount,
+          extractedChars: ocrOut.extractedChars,
+          durationMs: ocrOut.durationMs,
+          status: "completed",
+        });
+      }
 
       const pageFields = fuseAndClassifyPageGeometry({
         geom,
         pageBox: pageInfo.cropBox,
         rotation: rot,
         existingWidgets: existingOnPage,
+        extraLabels,
         uniqueName,
       });
 
       allFields.push(...pageFields);
     }
 
-    // Fallback baseline field only if document is purely scanned/image-only and no vector geometry exists
+    // Only emit a low-confidence review item if both vector AND raster CV+OCR produced zero geometry
     if (allFields.length === 0 && inspection.pages.length > 0) {
       const p0 = inspection.pages[0];
       const fallbackRect: PdfRect = {
@@ -378,8 +490,8 @@ async function analyzePdfNode(
       };
       allFields.push({
         id: "field_001",
-        name: "scanned_review_field",
-        label: "Scanned Input Area (OCR / Python CV Recommended)",
+        name: "blank_page_review_field",
+        label: "No Detectable Form Geometry (Manual Review)",
         type: "text",
         page: 0,
         originalDetectedRect: fallbackRect,
@@ -393,10 +505,10 @@ async function analyzePdfNode(
         originalLabelText: "",
         detectionSource: "manual",
         detectionSources: ["manual"],
-        confidence: 0.35,
+        confidence: 0.3,
         confidenceTier: "low",
         confidenceEvidence: [
-          "Image-only page without vector text or line geometry; run Python OpenCV/OCR or place fields manually",
+          "Page had no detectable vector or raster lines, boxes, circles, or text prompts",
         ],
         required: false,
         defaultValue: "",
@@ -404,7 +516,7 @@ async function analyzePdfNode(
         options: [],
         validation: {},
         reviewStatus: "pending",
-        reviewFlagReason: "Image-only PDF requires OpenCV/OCR or manual placement",
+        reviewFlagReason: "Blank or unstructured page — add fields manually if needed",
       });
     }
 
@@ -415,7 +527,10 @@ async function analyzePdfNode(
     const docId =
       typeof options.documentId === "string" ? options.documentId : "doc_node";
 
-    const detectionSummary = buildDetectionSummary(allFields, "node_vector_fusion");
+    const detectionSummary = buildDetectionSummary(
+      allFields,
+      usedCvOrOcr ? "node_cv_ocr_fusion" : "node_vector_fusion"
+    );
 
     const manifest: FieldManifest = {
       documentId: docId,
@@ -425,7 +540,9 @@ async function analyzePdfNode(
       fields: allFields,
       detectionSummary,
       generatedAt: new Date().toISOString(),
-      engineVersion: "formforge-node-fusion-2.0.0",
+      engineVersion: usedCvOrOcr
+        ? "formforge-node-cv-ocr-3.0.0"
+        : "formforge-node-fusion-3.0.0",
       hasExistingAcroForm: inspection.hasExistingAcroForm,
       isScanned: inspection.isScanned,
       securityFlags: inspection.securityFlags,
@@ -433,10 +550,13 @@ async function analyzePdfNode(
 
     return {
       inspection,
-      ocrJobs: [],
+      ocrJobs: ocrJobsReport,
       manifest,
     };
   } finally {
+    if (ocrSession) {
+      await ocrSession.terminate();
+    }
     await pdfjsDoc.cleanup();
   }
 }
@@ -468,8 +588,8 @@ async function generateAcroFormNode(payload: {
       Type: "Annot",
       Subtype: "Widget",
       FT: "Sig",
-      T: PDFString.of(fieldName),
-      TU: PDFString.of(label || fieldName),
+      T: makePdfLiteralString(fieldName),
+      TU: makePdfLiteralString(label || fieldName),
       Rect: [x0, y0, x1, y1],
       F: 4,
       P: page.ref,
@@ -516,6 +636,13 @@ async function generateAcroFormNode(payload: {
       fieldName = `${fld.name || fld.id}_${suffix++}`;
     }
 
+    const setTooltip = (fieldObj: { acroField: { dict: PDFDict } }, textVal: string) => {
+      const clean = toWinAnsiSafeText(textVal || fieldName).trim();
+      if (clean) {
+        fieldObj.acroField.dict.set(PDFName.of("TU"), makePdfLiteralString(clean));
+      }
+    };
+
     // Character-entry grids: generate native PDF Comb field when strategy is 'comb' (or default for contiguous uniform cells),
     // or individual single-character linked widgets when cells are visibly separated.
     if (
@@ -531,6 +658,7 @@ async function generateAcroFormNode(payload: {
         usedNames.add(fieldName);
         const [x0, y0, x1, y1] = topLeftPdfToBottomLeftPdf(fld.rect, cropBox, rot);
         const tf = form.createTextField(fieldName);
+        setTooltip(tf, fld.label || fieldName);
         tf.setMaxLength(fld.cellRects.length);
         tf.enableCombing();
         if (fld.defaultValue) {
@@ -551,6 +679,7 @@ async function generateAcroFormNode(payload: {
           const cr = fld.cellRects[ci];
           const [cx0, cy0, cx1, cy1] = topLeftPdfToBottomLeftPdf(cr, cropBox, rot);
           const tf = form.createTextField(cname);
+          setTooltip(tf, `${fld.label || fieldName} (${ci + 1}/${fld.cellRects.length})`);
           tf.setMaxLength(1);
           if (fld.defaultValue && ci < fld.defaultValue.length) {
             tf.setText(toWinAnsiSafeText(fld.defaultValue[ci]));
@@ -574,6 +703,7 @@ async function generateAcroFormNode(payload: {
 
     if (fld.type === "checkbox") {
       const cb = form.createCheckBox(fieldName);
+      setTooltip(cb, fld.label || fieldName);
       cb.addToPage(page, { x: x0, y: y0, width: w, height: h });
       if (isTruthyCheckValue(fld.defaultValue)) cb.check();
       createdWidgets++;
@@ -590,6 +720,7 @@ async function generateAcroFormNode(payload: {
       createdWidgets++;
     } else if (fld.type === "dropdown") {
       const dd = form.createDropdown(fieldName);
+      setTooltip(dd, fld.label || fieldName);
       const opts = fld.options.length > 0 ? fld.options : ["Option 1", "Option 2"];
       dd.addOptions(opts);
       if (fld.defaultValue && opts.includes(fld.defaultValue)) {
@@ -599,6 +730,7 @@ async function generateAcroFormNode(payload: {
       createdWidgets++;
     } else if (fld.type === "listbox") {
       const ol = form.createOptionList(fieldName);
+      setTooltip(ol, fld.label || fieldName);
       const opts = fld.options.length > 0 ? fld.options : ["Option 1", "Option 2"];
       ol.addOptions(opts);
       if (fld.defaultValue && opts.includes(fld.defaultValue)) {
@@ -608,6 +740,7 @@ async function generateAcroFormNode(payload: {
       createdWidgets++;
     } else if (fld.type === "radio") {
       const rg = form.createRadioGroup(fieldName);
+      setTooltip(rg, fld.label || fieldName);
       const opts = fld.options.length > 0 ? fld.options : ["Yes", "No"];
       const sliceW = fld.rect.width / opts.length;
       opts.forEach((opt, i) => {
@@ -636,6 +769,7 @@ async function generateAcroFormNode(payload: {
       createdWidgets++;
     } else {
       const tf = form.createTextField(fieldName);
+      setTooltip(tf, fld.label || fieldName);
       if (fld.multiline || fld.type === "multiline") {
         tf.enableMultiline();
       }

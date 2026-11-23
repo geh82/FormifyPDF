@@ -216,8 +216,8 @@ function parseConstructPath(
   if (Array.isArray(opsData) && opsData.length > 0 && opsData[0] && typeof opsData[0] === "object") {
     const first = opsData[0] as ArrayLike<number> & Record<string, number>;
     if (ArrayBuffer.isView(first)) {
-      const view = first as Float32Array | Float64Array;
-      for (let i = 0; i < view.length; i++) dataArr.push(view[i]);
+      const view = first as unknown as ArrayLike<number>;
+      for (let i = 0; i < view.length; i++) dataArr.push(Number(view[i]));
     } else if (typeof first.length === "number") {
       for (let i = 0; i < first.length; i++) dataArr.push(Number(first[i] ?? 0));
     } else {
@@ -225,8 +225,8 @@ function parseConstructPath(
       for (let i = 0; i < len; i++) dataArr.push(Number(first[String(i)] ?? 0));
     }
   } else if (ArrayBuffer.isView(opsData)) {
-    const view = opsData as Float32Array | Float64Array;
-    for (let i = 0; i < view.length; i++) dataArr.push(view[i]);
+    const view = opsData as unknown as ArrayLike<number>;
+    for (let i = 0; i < view.length; i++) dataArr.push(Number(view[i]));
   } else if (Array.isArray(opsData) && typeof opsData[0] === "number") {
     for (const v of opsData) dataArr.push(Number(v));
   }
@@ -303,10 +303,10 @@ function parseConstructPath(
       return;
     }
 
-    // 2. Single stroked line segment
-    if (subPathSegments === 1 && pts.length === 2 && kind !== "fill") {
-      const [p0x, p0y] = pts[0];
-      const [p1x, p1y] = pts[1];
+    // 2. Single stroked line segment (handles duplicate initial moveTo points cleanly)
+    if (subPathSegments === 1 && pts.length >= 2 && kind !== "fill") {
+      const [p0x, p0y] = pts[pts.length - 2];
+      const [p1x, p1y] = pts[pts.length - 1];
       const dx = Math.abs(p1x - p0x);
       const dy = Math.abs(p1y - p0y);
       if (dy <= 1.6 && dx >= 6.0) {
@@ -356,6 +356,8 @@ function parseConstructPath(
     if (op === DRAW_MOVE_TO && i + 1 < dataArr.length) {
       if (subPathSegments > 0) {
         flushSubpath();
+      } else if (pts.length > 0) {
+        resetSubpath();
       }
       const [px, py] = applyMat(ctm, dataArr[i], dataArr[i + 1]);
       i += 2;
@@ -414,6 +416,32 @@ function parseConstructPath(
   flushSubpath();
 }
 
+function formatRgbColor(args: unknown[]): string | undefined {
+  if (!args || args.length === 0) return undefined;
+  const first = args[0];
+  if (typeof first === "string") {
+    return first.startsWith("#") ? first : undefined;
+  }
+  const toByte = (v: number) =>
+    Math.max(0, Math.min(255, Math.round(v <= 1 && !Number.isInteger(v) ? v * 255 : v)));
+  if (args.length >= 3 && typeof args[0] === "number") {
+    const r = toByte(Number(args[0]));
+    const g = toByte(Number(args[1]));
+    const b = toByte(Number(args[2]));
+    return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+  }
+  if (first && typeof first === "object" && "length" in first) {
+    const arr = first as ArrayLike<number>;
+    if (arr.length >= 3) {
+      const r = toByte(Number(arr[0]));
+      const g = toByte(Number(arr[1]));
+      const b = toByte(Number(arr[2]));
+      return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+    }
+  }
+  return undefined;
+}
+
 export async function extractPageStructuralGeometry(
   jsPage: pdfjsLib.PDFPageProxy,
   pageIndex: number
@@ -455,11 +483,18 @@ export async function extractPageStructuralGeometry(
     } else if (fn === OPS.transform && args.length >= 6) {
       ctm = mulMat(ctm, args as number[]);
     } else if (fn === OPS.setFillRGBColor && args.length >= 1) {
-      fillColor = String(args[0] || "#000000");
+      fillColor = formatRgbColor(args) || fillColor;
     } else if (fn === OPS.setFillGray && args.length >= 1) {
-      const g = Math.max(0, Math.min(255, Math.round(Number(args[0]) * 255)));
+      const rawG = Number(args[0]);
+      const g = Math.max(0, Math.min(255, Math.round(rawG <= 1 ? rawG * 255 : rawG)));
       const h = g.toString(16).padStart(2, "0");
       fillColor = `#${h}${h}${h}`;
+    } else if (fn === OPS.setFillCMYKColor && args.length >= 4) {
+      const [c, m, y, k] = args.map((v: unknown) => Math.max(0, Math.min(1, Number(v) || 0)));
+      const r = Math.round(255 * (1 - c) * (1 - k));
+      const g = Math.round(255 * (1 - m) * (1 - k));
+      const b = Math.round(255 * (1 - y) * (1 - k));
+      fillColor = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
     } else if (fn === OPS.setLineWidth && args.length >= 1) {
       lineWidth = Math.max(0.25, Number(args[0] || 0.8));
     } else if (fn === OPS.constructPath) {
@@ -504,15 +539,38 @@ export async function extractPageStructuralGeometry(
     if (!("str" in item) || typeof item.str !== "string") continue;
     const txt = item.str;
     if (!txt.trim()) continue;
+
+    // Transform item coordinates into visual top-left viewport space, handling 0/90/180/270 page rotations
     const tm = pdfjsLib.Util.transform(viewport.transform, item.transform);
     const fontScale = Math.hypot(tm[0], tm[1]);
     const fontSize = Math.max(5.5, Number(item.height || fontScale || 9));
-    const width = Math.max(2, Number(item.width || txt.length * fontSize * 0.45));
-    const baseLineY = tm[5];
-    const x0 = tm[4];
-    const y0 = Math.max(0, baseLineY - fontSize * 0.88);
-    const x1 = x0 + width;
-    const y1 = baseLineY + fontSize * 0.2;
+    const rawW = Math.max(2, Number(item.width || txt.length * fontSize * 0.45));
+
+    // Unit direction along text baseline in visual space
+    const dirLen = Math.hypot(tm[0], tm[1]) || 1;
+    const ux = tm[0] / dirLen;
+    const uy = tm[1] / dirLen;
+    // Perpendicular up-direction in visual space (towards ascenders, which is -y for normal unrotated LTR)
+    const nx = uy;
+    const ny = -ux;
+
+    const bx = tm[4];
+    const by = tm[5];
+    const asc = fontSize * 0.88;
+    const desc = fontSize * 0.2;
+
+    const corners: Array<[number, number]> = [
+      [bx + nx * asc, by + ny * asc],
+      [bx + ux * rawW + nx * asc, by + uy * rawW + ny * asc],
+      [bx - nx * desc, by - ny * desc],
+      [bx + ux * rawW - nx * desc, by + uy * rawW - ny * desc],
+    ];
+    const xs = corners.map((c) => c[0]);
+    const ys = corners.map((c) => c[1]);
+    const x0 = Math.max(0, Math.min(...xs));
+    const y0 = Math.max(0, Math.min(...ys));
+    const x1 = Math.min(viewport.width, Math.max(...xs));
+    const y1 = Math.min(viewport.height, Math.max(...ys));
 
     const trimmed = txt.trim();
     const fontName = String(item.fontName || styles[String(item.fontName || "")]?.fontFamily || "");
@@ -532,8 +590,8 @@ export async function extractPageStructuralGeometry(
       text: trimmed,
       x0,
       y0,
-      x1,
-      y1,
+      x1: Math.max(x0 + 1, x1),
+      y1: Math.max(y0 + 1, y1),
       fontSize,
       fontName,
       isCheckboxGlyph,
