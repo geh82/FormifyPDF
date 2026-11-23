@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: formforge
+      POSTGRES_USER: formforge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_production}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./migrations/postgres/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U formforge"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      PYTHON_TIMEOUT_MS: 60000
+      FORMFORGE_STORAGE_DIR: /app/storage/formforge
+      FORMFORGE_DB_PATH: /app/storage/formforge/formforge.db
+      DATABASE_URL: postgres://formforge:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/formforge
+      REDIS_URL: redis://redis:6379
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-local}
+      FORMFORGE_ADMIN_PASSWORD: ${FORMFORGE_ADMIN_PASSWORD:-}
+    volumes:
+      - app_storage:/app/storage
+      - app_generated:/app/public/generated
+      - app_signed:/app/public/signed
+
+volumes:
+  pg_data:
+  redis_data:
+  app_storage:
+  app_generated:
+  app_signed:
