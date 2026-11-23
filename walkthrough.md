@@ -6,7 +6,7 @@
 ### Issues Resolved
 | Area | File | Line | What Was Happening | Impact | Status | How It Was Fixed |
 |---|---|---|---|---|---|---|
-| Storage Confinement & Missing Provider | `src/lib/storage/storage.ts` | 63 | The storage provider module imported at server startup was missing, leaving legacy PDF generation and signed uploads without confined file storage or S3 safeguards. | High | Fixed | Implemented `LocalStorageProvider` and `S3StorageProvider` with strict ID validation, canonical base-directory confinement, symlink rejection, atomic file writes, private permissions (`0600`/`0700`), and private-by-default S3 objects. |
+| Storage Confinement & Missing Provider | `src/lib/storage/storage.ts` | 83 | The storage provider module imported at server startup was missing, leaving legacy PDF generation and signed uploads without confined file storage or S3 safeguards. | High | Fixed | Implemented `LocalStorageProvider` and `S3StorageProvider` reusing shared security helpers (`assertConfinedPath`, `assertValidTenantId`, `isRegularNonSymlinkFile`, `validatePdfBufferSignature`), atomic file writes, private permissions (`0600`/`0700`), and private-by-default S3 objects. |
 | Missing Tenant Filter in Background Worker | `src/server/job-queue.ts` | 390 | `generateAcroFormAssetForDocument` queried `documents` by `id` alone without filtering by `tenant_id`. | Medium | Fixed | Added `AND tenant_id = ?` to the document lookup query and handled the bundled ALV source PDF safely without weakening storage bucket validation. |
 | Tenant Filtering & Metadata Cleanup Gaps | `src/server/v1Routes.ts` | 206 | Several update/delete statements omitted `AND tenant_id = ?`, retention sweeps only cleaned `tenant_default`, and deleting records could leave orphaned child files or `storage_metadata` rows. | Medium | Fixed | Added `AND tenant_id = ?` across update/delete queries, added `purgeAllTenantsExpiredDocuments`, and cleaned up child storage objects and `storage_metadata` records atomically on delete and purge. |
 | Supporting File Replacement Safeguards | `src/server/v1Routes.ts` | 2874 | There was no dedicated replacement endpoint for supporting attachments with transactional swap and old-file cleanup. | Low | Fixed | Added `PUT /api/v1/supporting-documents/:id` with RBAC checks (`documents:write`), tenant ownership checks before storing bytes, size caps (`413`), magic-byte/MIME validation (`400`), and old-file cleanup after DB commit. |
@@ -29,17 +29,17 @@
 |---|---|
 | Issue Type | Path Traversal / Arbitrary File Read & Write |
 | Impact | High |
-| Affected File | `src/lib/storage/storage.ts:63` |
+| Affected File | `src/lib/storage/storage.ts:83` |
 | Test Scenario | `GET /api/generated/..%2F..%2Fpackage.json/download` and `provider.saveGeneratedPdf("../evil", pdfBuffer)` + symlinked file inside storage directory |
 
 #### How It Was Fixed
-Document identifiers are validated against a strict safe-character pattern before resolving paths inside the storage root, and reads verify via `lstat` that the target is a regular non-symlink file.
+Document identifiers and optional tenant identifiers are validated against strict safe-character patterns before resolving confined paths inside the storage root, and reads verify via `lstat` that targets are regular non-symlink files.
 
 #### Step-by-Step Trace
 | Step | What Happens in the Code | Outcome |
 |---|---|---|
 | 1 | `GET /api/generated/..%2F..%2Fpackage.json/download` arrives at the legacy download handler and `provider.saveGeneratedPdf("../evil", buf)` is invoked in tests. | Enters validation |
-| 2 | `assertValidDocumentId` (`src/lib/storage/storage.ts:63`) and `resolveConfinedPath` (`src/lib/storage/storage.ts:70`) reject `..` and non-matching IDs before any filesystem operation runs; `isRegularNonSymlinkFile` (`src/lib/storage/storage.ts:82`) rejects symlinked targets. | Blocked before disk access |
+| 2 | `assertValidDocumentId` (`src/lib/storage/storage.ts:83`) and `assertConfinedPath` (`src/lib/storage/storage.ts:137`) reject `..` and non-matching IDs before any filesystem operation runs; `isRegularNonSymlinkFile` (`src/server/formforge-storage.ts`) rejects symlinked targets. | Blocked before disk access |
 | 3 | HTTP request returns `404` and storage call rejects with `"Invalid document identifier"`; symlinked reads return `null`. | **Handled Safely** |
 
 #### Conclusion

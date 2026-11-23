@@ -90,25 +90,68 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     delete process.env.MAX_UPLOAD_BYTES;
   });
 
-  it("validates LocalStorageProvider confinement, symlink rejection, and retention pruning", async () => {
+  it("validates LocalStorageProvider & S3StorageProvider separation, tenant isolation, healthCheck, symlink rejection, and retention pruning", async () => {
+    const unitGenDir = path.join(tmpRoot, "unit-gen");
+    const unitSignedDir = path.join(tmpRoot, "unit-signed");
     const provider = new LocalStorageProvider({
-      generatedDir: path.join(tmpRoot, "unit-gen"),
-      signedDir: path.join(tmpRoot, "unit-signed"),
+      generatedDir: unitGenDir,
+      signedDir: unitSignedDir,
     });
+
+    const health = await provider.healthCheck();
+    expect(health).toEqual({ ok: true, provider: "local" });
+
+    // Reject non-PDF payloads at the storage layer
     const docIdHex = "0123456789abcdef01234567";
+    await expect(
+      provider.saveGeneratedPdf(docIdHex, Buffer.from("not-a-pdf"))
+    ).rejects.toThrow(/empty or too small/i);
+    await expect(
+      provider.saveGeneratedPdf(docIdHex, Buffer.alloc(64, 0x41))
+    ).rejects.toThrow(/%PDF-/);
+
+    // Save generated PDF and confirm strict separation from signed PDFs
     await provider.saveGeneratedPdf(docIdHex, samplePdf);
     expect(await provider.existsGeneratedPdf(docIdHex)).toBe(true);
     expect(await provider.existsSignedPdf(docIdHex)).toBe(false);
+    expect(await provider.readSignedPdf(docIdHex)).toBeNull();
+    const readGen = await provider.readGeneratedPdf(docIdHex);
+    expect(readGen?.equals(samplePdf)).toBe(true);
 
-    // Reject path traversal IDs
+    // Save signed PDF separately and retrieve both independently
+    const signedPdf = await createSamplePdfBuffer("Signed Customer Copy:");
+    const signedMeta = {
+      sha256: "deadbeef".repeat(8),
+      byteSize: signedPdf.length,
+      uploadedAt: "2026-11-22T00:00:00.000Z",
+    };
+    await provider.saveSignedPdf(docIdHex, signedPdf, signedMeta);
+    expect(await provider.existsSignedPdf(docIdHex)).toBe(true);
+    expect((await provider.readSignedPdf(docIdHex))?.equals(signedPdf)).toBe(true);
+    expect(await provider.readSignedMetadata(docIdHex)).toEqual(signedMeta);
+
+    // Tenant isolation within LocalStorageProvider
+    const tenantPdfA = await createSamplePdfBuffer("Tenant A Document:");
+    const tenantPdfB = await createSamplePdfBuffer("Tenant B Document:");
+    await provider.saveGeneratedPdf(docIdHex, tenantPdfA, { tenantId: "tenant_a" });
+    await provider.saveGeneratedPdf(docIdHex, tenantPdfB, { tenantId: "tenant_b" });
+    expect((await provider.readGeneratedPdf(docIdHex, { tenantId: "tenant_a" }))?.equals(tenantPdfA)).toBe(true);
+    expect((await provider.readGeneratedPdf(docIdHex, { tenantId: "tenant_b" }))?.equals(tenantPdfB)).toBe(true);
+    expect(await provider.existsSignedPdf(docIdHex, { tenantId: "tenant_a" })).toBe(false);
+    await expect(
+      provider.saveGeneratedPdf(docIdHex, tenantPdfA, { tenantId: "../escape" })
+    ).rejects.toThrow(/Invalid tenant identifier/);
+
+    // Reject path traversal & malformed IDs
     await expect(provider.saveGeneratedPdf("../evil", samplePdf)).rejects.toThrow();
     await expect(provider.readGeneratedPdf("not-hex-id")).rejects.toThrow();
+    await expect(provider.existsSignedPdf("../evil")).rejects.toThrow();
 
     // Symlink rejection check
     const secretFile = path.join(tmpRoot, "secret.txt");
     fs.writeFileSync(secretFile, "SECRET");
     const symId = "aaaaaaaaaaaaaaaaaaaaaaaa";
-    const symPath = path.join(tmpRoot, "unit-gen", `${symId}.pdf`);
+    const symPath = path.join(unitGenDir, `${symId}.pdf`);
     try {
       fs.symlinkSync(secretFile, symPath);
       expect(await provider.existsGeneratedPdf(symId)).toBe(false);
@@ -117,21 +160,59 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
       // Symlinks may require elevated privileges on Windows; skip assertion if OS forbids symlink creation
     }
 
-    // Retention cleanup prunes aged files
-    const targetFile = path.join(tmpRoot, "unit-gen", `${docIdHex}.pdf`);
+    // Retention cleanup prunes aged generated, tenant, and signed PDFs + signed metadata
     const oldTime = new Date(Date.now() - 48 * 60 * 60 * 1000);
-    fs.utimesSync(targetFile, oldTime, oldTime);
+    const genFile = path.join(unitGenDir, `${docIdHex}.pdf`);
+    const tenantGenFile = path.join(unitGenDir, "tenants", "tenant_a", `${docIdHex}.pdf`);
+    const signedFile = path.join(unitSignedDir, `${docIdHex}_signed.pdf`);
+    fs.utimesSync(genFile, oldTime, oldTime);
+    fs.utimesSync(tenantGenFile, oldTime, oldTime);
+    fs.utimesSync(signedFile, oldTime, oldTime);
     const pruned = await provider.deleteExpired(24);
-    expect(pruned.deletedGenerated).toBe(1);
+    expect(pruned.deletedGenerated).toBe(2);
+    expect(pruned.deletedSigned).toBe(1);
     expect(await provider.existsGeneratedPdf(docIdHex)).toBe(false);
+    expect(await provider.existsGeneratedPdf(docIdHex, { tenantId: "tenant_a" })).toBe(false);
+    expect(await provider.existsGeneratedPdf(docIdHex, { tenantId: "tenant_b" })).toBe(true);
+    expect(await provider.existsSignedPdf(docIdHex)).toBe(false);
+    expect(fs.existsSync(path.join(unitSignedDir, `${docIdHex}_meta.json`))).toBe(false);
 
-    // S3 provider fails safely if S3_BUCKET is missing
+    // Separate directories invariant check
+    expect(
+      () => new LocalStorageProvider({ generatedDir: unitGenDir, signedDir: unitGenDir })
+    ).toThrow(/separate/i);
+
+    // S3 provider config validation & cache switching
     process.env.STORAGE_PROVIDER = "s3";
     delete process.env.S3_BUCKET;
     resetStorageProviderCache();
     expect(() => getStorageProvider()).toThrow(/S3_BUCKET/);
+
+    process.env.S3_BUCKET = "formforge-test-bucket";
+    process.env.S3_REGION = "eu-west-1";
+    process.env.S3_PREFIX = "prod-alv";
+    process.env.S3_ENDPOINT = "http://127.0.0.1:1";
+    process.env.S3_FORCE_PATH_STYLE = "true";
+    process.env.S3_ACCESS_KEY_ID = "test";
+    process.env.S3_SECRET_ACCESS_KEY = "test";
+    resetStorageProviderCache();
+    const s3Provider = getStorageProvider();
+    expect(s3Provider.providerName).toBe("s3");
+    expect(getStorageProvider()).toBe(s3Provider); // singleton cached until reset
+    const s3Health = await s3Provider.healthCheck();
+    expect(s3Health.ok).toBe(false);
+    expect(s3Health.provider).toBe("s3");
+
+    delete process.env.S3_BUCKET;
+    delete process.env.S3_REGION;
+    delete process.env.S3_PREFIX;
+    delete process.env.S3_ENDPOINT;
+    delete process.env.S3_FORCE_PATH_STYLE;
+    delete process.env.S3_ACCESS_KEY_ID;
+    delete process.env.S3_SECRET_ACCESS_KEY;
     process.env.STORAGE_PROVIDER = "local";
     resetStorageProviderCache();
+    expect(getStorageProvider().providerName).toBe("local");
   });
 
   it("initializes migrations 001 + 002 safely and preserves data across re-initialization", () => {

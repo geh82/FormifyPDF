@@ -10,6 +10,7 @@ import {
   isValidDocumentId,
   toPdfEnginePayload,
 } from "../lib/validation/alv-schema.ts";
+import { validatePdfBufferSignature } from "./formforge-storage.ts";
 import {
   PythonEngineError,
   resolvePythonExecutable,
@@ -28,12 +29,7 @@ export function isValidPdfBuffer(buffer: Buffer): boolean {
   if (!Buffer.isBuffer(buffer) || buffer.length < 100) {
     return false;
   }
-  const header = buffer.subarray(0, 1024).toString("latin1");
-  if (!header.includes("%PDF-")) {
-    return false;
-  }
-  const tail = buffer.subarray(Math.max(0, buffer.length - 2048)).toString("latin1");
-  return tail.includes("%%EOF");
+  return validatePdfBufferSignature(buffer).valid;
 }
 
 export function createApiRouter(config: ApiRouterConfig = {}): express.Router {

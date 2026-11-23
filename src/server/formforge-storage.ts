@@ -1,6 +1,46 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
+
+const TENANT_ID_REGEX = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function assertValidTenantId(tenantId: string): string {
+  if (typeof tenantId !== "string" || !TENANT_ID_REGEX.test(tenantId)) {
+    throw new Error("Invalid tenant identifier");
+  }
+  return tenantId;
+}
+
+export function assertConfinedPath(baseDir: string, ...segments: string[]): string {
+  const resolvedBase = path.resolve(baseDir);
+  const resolvedTarget = path.resolve(resolvedBase, ...segments);
+  const baseWithSep = resolvedBase.endsWith(path.sep)
+    ? resolvedBase
+    : `${resolvedBase}${path.sep}`;
+  if (!resolvedTarget.startsWith(baseWithSep)) {
+    throw new Error("Resolved storage path escaped storage root");
+  }
+  return resolvedTarget;
+}
+
+export function isRegularNonSymlinkFileSync(filePath: string): boolean {
+  try {
+    const stat = fs.lstatSync(filePath);
+    return !stat.isSymbolicLink() && stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
+export async function isRegularNonSymlinkFile(filePath: string): Promise<boolean> {
+  try {
+    const stat = await fsp.lstat(filePath);
+    return !stat.isSymbolicLink() && stat.isFile();
+  } catch {
+    return false;
+  }
+}
 
 export type FormForgeStorageClass =
   | "originals"
@@ -59,11 +99,7 @@ export function resolveSafeStoragePath(
   }
 
   const root = ensureStorageDirs(rootDir);
-  const resolved = path.resolve(root, ...segments);
-  if (!resolved.startsWith(root + path.sep)) {
-    throw new Error("Resolved storage path escaped storage root");
-  }
-  return resolved;
+  return assertConfinedPath(root, ...segments);
 }
 
 export function validatePdfBufferSignature(buffer: Buffer): {
@@ -185,9 +221,7 @@ export function saveStorageBuffer(
 
 export function readStorageBuffer(storageKey: string, rootDir?: string): Buffer | null {
   const abs = resolveSafeStoragePath(storageKey, rootDir);
-  if (!fs.existsSync(abs)) return null;
-  const stat = fs.lstatSync(abs);
-  if (stat.isSymbolicLink() || !stat.isFile()) return null;
+  if (!isRegularNonSymlinkFileSync(abs)) return null;
   return fs.readFileSync(abs);
 }
 
