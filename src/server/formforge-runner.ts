@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { runFormForgeNodeEngine } from "./formforge-node-engine.ts";
 
 export type EngineCommand =
   | "inspect"
@@ -15,6 +16,14 @@ export function detectPythonExecutable(): string {
   const configured = (process.env.PYTHON_EXECUTABLE || "").trim();
   if (configured) return configured;
   return process.platform === "win32" ? "python" : "python3";
+}
+
+function isMissingPythonDepsError(msg: string): boolean {
+  return (
+    msg.includes("ModuleNotFoundError") ||
+    msg.includes("No module named") ||
+    msg.includes("ENOENT")
+  );
 }
 
 export async function runFormForgePythonEngine<T = unknown>(
@@ -101,10 +110,27 @@ export async function runFormForgePythonEngine<T = unknown>(
     }
 
     if (exitCode !== 0) {
+      if (
+        !options.scriptPath &&
+        !options.pythonExecutable &&
+        isMissingPythonDepsError(stderr)
+      ) {
+        return await runFormForgeNodeEngine<T>(command, payload);
+      }
       throw new Error(stderr || `Python engine exited with code ${exitCode}`);
     }
 
     throw new Error("Python engine produced no output manifest");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (
+      !options.scriptPath &&
+      !options.pythonExecutable &&
+      isMissingPythonDepsError(msg)
+    ) {
+      return await runFormForgeNodeEngine<T>(command, payload);
+    }
+    throw err;
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

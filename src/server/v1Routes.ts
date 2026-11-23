@@ -34,6 +34,7 @@ import {
   resolveSafeStoragePath,
   saveStorageBuffer,
   validatePdfBufferSignature,
+  validateSupportingFileSignature,
 } from "./formforge-storage.ts";
 import {
   enqueueAnalysisJob,
@@ -112,15 +113,36 @@ export function purgeExpiredDocuments(tenantId: string): {
     db.prepare("DELETE FROM generated_documents WHERE id = ?").run(g.id);
   }
 
+  const expiredSup = db
+    .prepare(
+      `SELECT id, storage_key FROM supporting_documents
+       WHERE tenant_id = ? AND retention_expires_at IS NOT NULL AND retention_expires_at <= datetime('now')`
+    )
+    .all(tenantId) as Array<{ id: string; storage_key: string }>;
+
+  for (const s of expiredSup) {
+    deleteStorageObject(s.storage_key);
+    db.prepare("DELETE FROM supporting_documents WHERE id = ?").run(s.id);
+  }
+
   return {
     deletedDocuments: expiredDocs.length,
     deletedGenerated: expiredGen.length,
   };
 }
 
+function sanitizeHeaderFilename(rawName: string, fallback = "document.pdf"): string {
+  const base = path.basename(rawName || fallback).replace(/["\r\n\\]/g, "_").trim();
+  return base || fallback;
+}
+
 export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
   const router = express.Router();
   const maxPdfBytes = config.maxPdfUploadBytes ?? 35 * 1024 * 1024;
+  const maxSupportingBytes = Math.max(
+    1024,
+    Number(process.env.MAX_UPLOAD_BYTES || String(10 * 1024 * 1024))
+  );
   const limiter = config.disableRateLimit
     ? (_req: express.Request, _res: express.Response, next: NextFunction) => next()
     : createRateLimiter();
@@ -128,6 +150,11 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
   const pdfUpload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: maxPdfBytes, files: 1, fields: 8 },
+  });
+
+  const supportingUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: maxSupportingBytes, files: 10, fields: 10 },
   });
 
   // Security headers + API request logging
@@ -217,6 +244,16 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         },
         "/rendered/{id}/upload-signed": {
           post: { summary: "Upload physically signed customer PDF" },
+        },
+        "/supporting-documents": {
+          get: { summary: "List supporting PDF/image attachments for tenant or form" },
+          post: { summary: "Upload one or more supporting PDF/image documents (PNG, JPEG, WebP, PDF)" },
+        },
+        "/supporting-documents/{id}/download": {
+          get: { summary: "Download supporting document attachment securely" },
+        },
+        "/supporting-documents/{id}": {
+          delete: { summary: "Delete supporting document attachment" },
         },
       },
     });
@@ -840,6 +877,14 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
           res.status(400).json({ ok: false, error: "Only .pdf files are supported." });
           return;
         }
+        if (
+          file.mimetype &&
+          file.mimetype !== "application/pdf" &&
+          file.mimetype !== "application/octet-stream"
+        ) {
+          res.status(400).json({ ok: false, error: "Uploaded file MIME type must be application/pdf." });
+          return;
+        }
 
         const sig = validatePdfBufferSignature(file.buffer);
         if (!sig.valid) {
@@ -1028,7 +1073,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader(
         "Content-Disposition",
-        `inline; filename="${path.basename(doc.original_filename).replace(/"/g, "")}"`
+        `inline; filename="${sanitizeHeaderFilename(doc.original_filename)}"`
       );
       res.send(buf);
     }
@@ -2057,7 +2102,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename="${row.slug}-acroform-master.pdf"`
+        `attachment; filename="${sanitizeHeaderFilename(`${row.slug}-acroform-master.pdf`)}"`
       );
       res.send(buf);
     }
@@ -2264,7 +2309,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader(
         "Content-Disposition",
-        `${disposition}; filename="${row.reference_code}.pdf"`
+        `${disposition}; filename="${sanitizeHeaderFilename(`${row.reference_code}.pdf`)}"`
       );
       res.send(buf);
     }
@@ -2284,6 +2329,14 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         const file = req.file;
         if (!file || !file.buffer || !file.originalname.toLowerCase().endsWith(".pdf")) {
           res.status(400).json({ ok: false, error: "A valid .pdf file is required" });
+          return;
+        }
+        if (
+          file.mimetype &&
+          file.mimetype !== "application/pdf" &&
+          file.mimetype !== "application/octet-stream"
+        ) {
+          res.status(400).json({ ok: false, error: "Uploaded file MIME type must be application/pdf" });
           return;
         }
         const sig = validatePdfBufferSignature(file.buffer);
@@ -2343,6 +2396,339 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
           byteSize: stored.byteSize,
         });
       });
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Supporting Document Uploads (PDF, PNG, JPEG, WebP — single or multi-file)
+  // -------------------------------------------------------------------------
+  router.get(
+    "/supporting-documents",
+    requireAuth,
+    requirePermission("documents:read"),
+    (req: AuthedRequest, res) => {
+      const db = getDatabase();
+      const tid = req.principal!.tenantId;
+      const documentId =
+        typeof req.query.documentId === "string" ? req.query.documentId.trim() : "";
+      const generatedDocumentId =
+        typeof req.query.generatedDocumentId === "string"
+          ? req.query.generatedDocumentId.trim()
+          : "";
+
+      let rows: unknown[];
+      if (documentId) {
+        rows = db
+          .prepare(
+            `SELECT id, document_id, generated_document_id, uploaded_by, category, original_filename, mime_type, sha256, byte_size, created_at
+             FROM supporting_documents
+             WHERE tenant_id = ? AND document_id = ?
+             ORDER BY created_at DESC`
+          )
+          .all(tid, documentId);
+      } else if (generatedDocumentId) {
+        rows = db
+          .prepare(
+            `SELECT id, document_id, generated_document_id, uploaded_by, category, original_filename, mime_type, sha256, byte_size, created_at
+             FROM supporting_documents
+             WHERE tenant_id = ? AND generated_document_id = ?
+             ORDER BY created_at DESC`
+          )
+          .all(tid, generatedDocumentId);
+      } else {
+        rows = db
+          .prepare(
+            `SELECT id, document_id, generated_document_id, uploaded_by, category, original_filename, mime_type, sha256, byte_size, created_at
+             FROM supporting_documents
+             WHERE tenant_id = ?
+             ORDER BY created_at DESC LIMIT 100`
+          )
+          .all(tid);
+      }
+
+      res.json({ ok: true, supportingDocuments: rows });
+    }
+  );
+
+  router.post(
+    "/supporting-documents",
+    limiter,
+    requireAuth,
+    requirePermission("documents:write"),
+    (req: AuthedRequest, res) => {
+      supportingUpload.fields([
+        { name: "files", maxCount: 10 },
+        { name: "file", maxCount: 10 },
+      ])(req, res, (multerErr: unknown) => {
+        if (multerErr) {
+          if (
+            multerErr instanceof multer.MulterError &&
+            multerErr.code === "LIMIT_FILE_SIZE"
+          ) {
+            res.status(413).json({
+              ok: false,
+              error: `Supporting file exceeds maximum size of ${Math.round(
+                maxSupportingBytes / (1024 * 1024)
+              )} MB.`,
+            });
+            return;
+          }
+          res.status(400).json({
+            ok: false,
+            error:
+              multerErr instanceof Error
+                ? multerErr.message
+                : "Invalid multipart supporting-document upload",
+          });
+          return;
+        }
+
+        const fileMap = (req.files || {}) as Record<string, Express.Multer.File[]>;
+        const files = [...(fileMap.files || []), ...(fileMap.file || [])];
+        if (files.length === 0) {
+          res.status(400).json({
+            ok: false,
+            error: "At least one supporting document file (PDF, PNG, JPEG, or WebP) is required.",
+          });
+          return;
+        }
+
+        const documentId =
+          typeof req.body?.documentId === "string" && req.body.documentId.trim()
+            ? req.body.documentId.trim()
+            : null;
+        const generatedDocumentId =
+          typeof req.body?.generatedDocumentId === "string" &&
+          req.body.generatedDocumentId.trim()
+            ? req.body.generatedDocumentId.trim()
+            : null;
+
+        if (!documentId && !generatedDocumentId) {
+          res.status(400).json({
+            ok: false,
+            error: "Either documentId or generatedDocumentId is required to associate supporting documents.",
+          });
+          return;
+        }
+
+        const db = getDatabase();
+        const tid = req.principal!.tenantId;
+
+        if (documentId) {
+          const docExists = db
+            .prepare("SELECT id FROM documents WHERE id = ? AND tenant_id = ?")
+            .get(documentId, tid);
+          if (!docExists) {
+            res.status(404).json({ ok: false, error: "Associated document not found" });
+            return;
+          }
+        }
+        if (generatedDocumentId) {
+          const genExists = db
+            .prepare("SELECT id FROM generated_documents WHERE id = ? AND tenant_id = ?")
+            .get(generatedDocumentId, tid);
+          if (!genExists) {
+            res.status(404).json({ ok: false, error: "Associated generated document not found" });
+            return;
+          }
+        }
+
+        const category =
+          typeof req.body?.category === "string" && req.body.category.trim()
+            ? req.body.category.trim().slice(0, 64)
+            : "supporting";
+
+        // Validate every uploaded file before storing any bytes
+        const validated: Array<{ file: Express.Multer.File; mimeType: string }> = [];
+        for (const f of files) {
+          const sig = validateSupportingFileSignature(
+            f.buffer,
+            f.originalname,
+            f.mimetype
+          );
+          if (!sig.valid || !sig.mimeType) {
+            res.status(400).json({
+              ok: false,
+              error: `${sanitizeHeaderFilename(f.originalname)}: ${sig.reason || "Invalid file"}`,
+            });
+            return;
+          }
+          validated.push({ file: f, mimeType: sig.mimeType });
+        }
+
+        const tenant = db
+          .prepare("SELECT retention_days FROM tenants WHERE id = ?")
+          .get(tid) as { retention_days: number } | undefined;
+        const expiresAt = new Date(
+          Date.now() + (tenant?.retention_days ?? 30) * 24 * 60 * 60 * 1000
+        ).toISOString();
+
+        const storedKeys: string[] = [];
+        const createdRecords: Array<{
+          id: string;
+          originalFilename: string;
+          mimeType: string;
+          byteSize: number;
+          sha256: string;
+          downloadUrl: string;
+        }> = [];
+
+        db.exec("BEGIN;");
+        try {
+          const insSup = db.prepare(`
+            INSERT INTO supporting_documents (
+              id, tenant_id, document_id, generated_document_id, uploaded_by,
+              category, original_filename, mime_type, storage_key, sha256, byte_size, retention_expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          const insMeta = db.prepare(`
+            INSERT INTO storage_metadata (
+              id, tenant_id, provider, storage_key, bucket_or_dir, content_type, byte_size, sha256, classification, retention_expires_at
+            ) VALUES (?, ?, 'local', ?, 'supporting', ?, ?, ?, 'supporting', ?)
+          `);
+
+          for (const item of validated) {
+            const safeName = sanitizeHeaderFilename(item.file.originalname, "supporting.bin");
+            const stored = saveStorageBuffer(
+              "supporting",
+              safeName,
+              item.file.buffer
+            );
+            storedKeys.push(stored.storageKey);
+            const supId = `sup_${crypto.randomBytes(10).toString("hex")}`;
+
+            insSup.run(
+              supId,
+              tid,
+              documentId,
+              generatedDocumentId,
+              req.principal!.userId,
+              category,
+              safeName,
+              item.mimeType,
+              stored.storageKey,
+              stored.sha256,
+              stored.byteSize,
+              expiresAt
+            );
+
+            insMeta.run(
+              `stm_${crypto.randomBytes(8).toString("hex")}`,
+              tid,
+              stored.storageKey,
+              item.mimeType,
+              stored.byteSize,
+              stored.sha256,
+              expiresAt
+            );
+
+            createdRecords.push({
+              id: supId,
+              originalFilename: safeName,
+              mimeType: item.mimeType,
+              byteSize: stored.byteSize,
+              sha256: stored.sha256,
+              downloadUrl: `/api/v1/supporting-documents/${supId}/download`,
+            });
+          }
+
+          db.exec("COMMIT;");
+        } catch (err) {
+          db.exec("ROLLBACK;");
+          for (const key of storedKeys) {
+            deleteStorageObject(key);
+          }
+          console.error("[Supporting Document Upload Error]", err);
+          res.status(500).json({ ok: false, error: "Failed to store supporting documents" });
+          return;
+        }
+
+        logAuditEvent({
+          tenantId: tid,
+          actorUserId: req.principal!.userId,
+          actorEmail: req.principal!.email,
+          action: "supporting_documents.uploaded",
+          resourceType: documentId ? "document" : "generated_document",
+          resourceId: documentId || generatedDocumentId,
+          metadata: { count: createdRecords.length, category },
+        });
+
+        res.status(201).json({
+          ok: true,
+          supportingDocuments: createdRecords,
+        });
+      });
+    }
+  );
+
+  router.get(
+    "/supporting-documents/:id/download",
+    requireAuth,
+    requirePermission("documents:read"),
+    (req: AuthedRequest, res) => {
+      const db = getDatabase();
+      const row = db
+        .prepare(
+          `SELECT storage_key, mime_type, original_filename
+           FROM supporting_documents
+           WHERE id = ? AND tenant_id = ?`
+        )
+        .get(req.params.id, req.principal!.tenantId) as
+        | { storage_key: string; mime_type: string; original_filename: string }
+        | undefined;
+      if (!row) {
+        res.status(404).json({ ok: false, error: "Supporting document not found" });
+        return;
+      }
+
+      const buf = readStorageBuffer(row.storage_key);
+      if (!buf) {
+        res.status(404).json({ ok: false, error: "Supporting document file missing or expired" });
+        return;
+      }
+
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Type", row.mime_type);
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${sanitizeHeaderFilename(row.original_filename, "supporting")}"`
+      );
+      res.setHeader("Content-Length", String(buf.length));
+      res.send(buf);
+    }
+  );
+
+  router.delete(
+    "/supporting-documents/:id",
+    requireAuth,
+    requirePermission("documents:delete"),
+    (req: AuthedRequest, res) => {
+      const db = getDatabase();
+      const row = db
+        .prepare(
+          "SELECT id, storage_key FROM supporting_documents WHERE id = ? AND tenant_id = ?"
+        )
+        .get(req.params.id, req.principal!.tenantId) as
+        | { id: string; storage_key: string }
+        | undefined;
+      if (!row) {
+        res.status(404).json({ ok: false, error: "Supporting document not found" });
+        return;
+      }
+
+      deleteStorageObject(row.storage_key);
+      db.prepare("DELETE FROM supporting_documents WHERE id = ?").run(row.id);
+
+      logAuditEvent({
+        tenantId: req.principal!.tenantId,
+        actorUserId: req.principal!.userId,
+        actorEmail: req.principal!.email,
+        action: "supporting_document.deleted",
+        resourceType: "supporting_document",
+        resourceId: row.id,
+      });
+
+      res.json({ ok: true, id: row.id });
     }
   );
 

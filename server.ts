@@ -1,11 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import express from "express";
 import { createZipUploadRouter } from "./server/zipRoutes.ts";
 import type { ZipRouterConfig } from "./server/zipRoutes.ts";
 import { getStorageProvider } from "./src/lib/storage/storage.ts";
-import { getDatabase } from "./src/server/db/database.ts";
+import { getDatabase, resetDatabaseCache } from "./src/server/db/database.ts";
 import { createApiRouter } from "./src/server/routes.ts";
 import type { ApiRouterConfig } from "./src/server/routes.ts";
 import { createV1ApiRouter, purgeExpiredDocuments } from "./src/server/v1Routes.ts";
@@ -79,8 +80,8 @@ export async function createApp(apiConfig: AppConfig = {}) {
 }
 
 const isEntryPoint =
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
+  Boolean(process.argv[1]) &&
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 
 if (isEntryPoint) {
   const port = Number(process.env.PORT || "3000");
@@ -93,8 +94,8 @@ if (isEntryPoint) {
 
   // Periodic POPIA & FormForge retention cleanup
   const storage = getStorageProvider();
-  setInterval(() => {
-    storage.deleteExpired(retentionHours).catch((err) => {
+  const retentionTimer = setInterval(() => {
+    storage.deleteExpired(retentionHours).catch((err: unknown) => {
       console.error("[Retention Cleanup Error]", err);
     });
     try {
@@ -102,9 +103,26 @@ if (isEntryPoint) {
     } catch (err) {
       console.error("[FormForge Retention Error]", err);
     }
-  }, 60 * 60 * 1000).unref();
+  }, 60 * 60 * 1000);
+  retentionTimer.unref();
 
-  app.listen(port, "0.0.0.0", () => {
+  const httpServer = app.listen(port, "0.0.0.0", () => {
     console.log(`FormForge AI & ALV Form Online listening on http://0.0.0.0:${port}`);
   });
+
+  const shutdown = (signal: string) => {
+    console.log(`[Shutdown] Received ${signal}, closing HTTP server and SQLite database...`);
+    clearInterval(retentionTimer);
+    httpServer.close(() => {
+      resetDatabaseCache();
+      process.exit(0);
+    });
+    setTimeout(() => {
+      resetDatabaseCache();
+      process.exit(1);
+    }, 5000).unref();
+  };
+
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }

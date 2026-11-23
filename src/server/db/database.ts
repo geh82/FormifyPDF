@@ -42,9 +42,9 @@ export function getDatabase(overridePath?: string): DatabaseSync {
 
   fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(dbPath);
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec("PRAGMA journal_mode = WAL;");
-  db.exec("PRAGMA busy_timeout = 5000;");
 
   runMigrations(db);
   seedBaselineData(db);

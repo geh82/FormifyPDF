@@ -183,9 +183,7 @@ export function resolvePrincipalFromRequest(
   }
 
   // 2. Check User Session Token (Bearer ffs_...)
-  const sessionToken =
-    rawBearer ||
-    (typeof req.query.token === "string" ? req.query.token.trim() : "");
+  const sessionToken = rawBearer;
   if (!sessionToken) return null;
 
   const tokenHash = hashToken(sessionToken);

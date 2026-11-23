@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { runAlvNodeEngine } from "./alv-node-engine.ts";
 
 export interface PythonRunOptions {
   pythonExecutable?: string;
@@ -166,6 +167,9 @@ export async function runAlvPythonEngine(
     if (exitCode !== 0) {
       const msg = stderr.trim() || `Python PDF engine exited with code ${exitCode}`;
       if (msg.includes("No module named 'fitz'") || msg.includes("ModuleNotFoundError")) {
+        if (!options.scriptPath && !options.pythonExecutable) {
+          return await runAlvNodeEngine(payload, { templatePath, fieldMapPath });
+        }
         throw new PythonEngineError(
           "PYMUPDF_MISSING",
           "PyMuPDF (fitz) dependency is not installed in the Python environment"
@@ -192,6 +196,16 @@ export async function runAlvPythonEngine(
     }
 
     return { pdfBuffer, stdout };
+  } catch (err) {
+    if (
+      err instanceof PythonEngineError &&
+      err.code === "PYTHON_NOT_FOUND" &&
+      !options.scriptPath &&
+      !options.pythonExecutable
+    ) {
+      return await runAlvNodeEngine(payload, { templatePath, fieldMapPath });
+    }
+    throw err;
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }

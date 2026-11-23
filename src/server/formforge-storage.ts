@@ -7,6 +7,7 @@ export type FormForgeStorageClass =
   | "acroforms"
   | "renders"
   | "signed"
+  | "supporting"
   | "thumbnails";
 
 export function getFormForgeStorageRoot(overrideRoot?: string): string {
@@ -24,6 +25,7 @@ export function ensureStorageDirs(rootDir?: string): string {
     "acroforms",
     "renders",
     "signed",
+    "supporting",
     "thumbnails",
   ];
   for (const dir of subdirs) {
@@ -49,6 +51,7 @@ export function resolveSafeStoragePath(
     "acroforms",
     "renders",
     "signed",
+    "supporting",
     "thumbnails",
   ]);
   if (!allowedBuckets.has(segments[0])) {
@@ -80,6 +83,84 @@ export function validatePdfBufferSignature(buffer: Buffer): {
     return { valid: false, reason: "PDF file appears truncated (missing %%EOF trailer)." };
   }
   return { valid: true };
+}
+
+export function validateSupportingFileSignature(
+  buffer: Buffer,
+  filename: string,
+  declaredMime?: string
+): { valid: boolean; mimeType?: string; reason?: string } {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+    return { valid: false, reason: "Supporting file is empty." };
+  }
+  const ext = path.extname(filename || "").toLowerCase();
+  const mime = (declaredMime || "").toLowerCase().split(";")[0].trim();
+
+  if (ext === ".pdf") {
+    if (mime && mime !== "application/pdf" && mime !== "application/octet-stream") {
+      return { valid: false, reason: "PDF file has an unexpected MIME type." };
+    }
+    const sig = validatePdfBufferSignature(buffer);
+    return sig.valid
+      ? { valid: true, mimeType: "application/pdf" }
+      : { valid: false, reason: sig.reason };
+  }
+
+  if (ext === ".png") {
+    if (mime && mime !== "image/png" && mime !== "application/octet-stream") {
+      return { valid: false, reason: "PNG file has an unexpected MIME type." };
+    }
+    const isPng =
+      buffer.length >= 8 &&
+      buffer[0] === 0x89 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x4e &&
+      buffer[3] === 0x47 &&
+      buffer[4] === 0x0d &&
+      buffer[5] === 0x0a &&
+      buffer[6] === 0x1a &&
+      buffer[7] === 0x0a;
+    return isPng
+      ? { valid: true, mimeType: "image/png" }
+      : { valid: false, reason: "File failed PNG magic-byte verification." };
+  }
+
+  if (ext === ".jpg" || ext === ".jpeg") {
+    if (
+      mime &&
+      mime !== "image/jpeg" &&
+      mime !== "image/jpg" &&
+      mime !== "application/octet-stream"
+    ) {
+      return { valid: false, reason: "JPEG file has an unexpected MIME type." };
+    }
+    const isJpeg =
+      buffer.length >= 4 &&
+      buffer[0] === 0xff &&
+      buffer[1] === 0xd8 &&
+      buffer[2] === 0xff;
+    return isJpeg
+      ? { valid: true, mimeType: "image/jpeg" }
+      : { valid: false, reason: "File failed JPEG magic-byte verification." };
+  }
+
+  if (ext === ".webp") {
+    if (mime && mime !== "image/webp" && mime !== "application/octet-stream") {
+      return { valid: false, reason: "WebP file has an unexpected MIME type." };
+    }
+    const isWebp =
+      buffer.length >= 12 &&
+      buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+      buffer.subarray(8, 12).toString("ascii") === "WEBP";
+    return isWebp
+      ? { valid: true, mimeType: "image/webp" }
+      : { valid: false, reason: "File failed WebP magic-byte verification." };
+  }
+
+  return {
+    valid: false,
+    reason: "Unsupported supporting file type. Allowed formats: .pdf, .png, .jpg, .jpeg, .webp.",
+  };
 }
 
 export function saveStorageBuffer(
