@@ -80,6 +80,8 @@ export interface DetectedFormField {
   rect: PdfRect;
   /** Optional individual character-cell bounding boxes in PDF points when type === "char_cells" */
   cellRects?: PdfRect[];
+  /** Optional per-option bounding boxes in PDF points for radio/selection groups */
+  optionRects?: Record<string, PdfRect>;
   coordinateSpace: "top_left_pdf_pt";
   originalLabelText: string;
   detectionSource: DetectionSource;

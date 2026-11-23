@@ -9,7 +9,10 @@ import { getStorageProvider } from "./src/lib/storage/storage.ts";
 import { getDatabase, resetDatabaseCache } from "./src/server/db/database.ts";
 import { createApiRouter } from "./src/server/routes.ts";
 import type { ApiRouterConfig } from "./src/server/routes.ts";
-import { createV1ApiRouter, purgeExpiredDocuments } from "./src/server/v1Routes.ts";
+import {
+  createV1ApiRouter,
+  purgeAllTenantsExpiredDocuments,
+} from "./src/server/v1Routes.ts";
 
 dotenv.config();
 
@@ -99,7 +102,7 @@ if (isEntryPoint) {
       console.error("[Retention Cleanup Error]", err);
     });
     try {
-      purgeExpiredDocuments("tenant_default");
+      purgeAllTenantsExpiredDocuments();
     } catch (err) {
       console.error("[FormForge Retention Error]", err);
     }

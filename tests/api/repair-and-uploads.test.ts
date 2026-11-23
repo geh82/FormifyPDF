@@ -394,4 +394,162 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     expect(renderRes.populatedWidgets).toBeGreaterThanOrEqual(1);
     expect(fs.readFileSync(flatPath).subarray(0, 5).toString("ascii")).toBe("%PDF-");
   });
+
+  it("verifies seeded ALV manifest coordinates, renders dotted/nested/radio/right-aligned fields, and supports PUT replacement & tenant isolation", async () => {
+    // 1. Seeded ALV template manifest verification
+    const manRes = await fetch(`${baseUrl}/api/v1/templates/tpl_alv_official/manifest`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    expect(manRes.status).toBe(200);
+    const manJson = await manRes.json();
+    expect(manJson.manifest.pages).toHaveLength(2);
+    expect(manJson.manifest.fields).toHaveLength(48);
+
+    const idTypeField = manJson.manifest.fields.find(
+      (f: { name: string }) => f.name === "owner_identificationType"
+    );
+    expect(idTypeField?.type).toBe("radio");
+    expect(idTypeField?.optionRects?.rsa_id?.width).toBeGreaterThan(5);
+    for (const f of manJson.manifest.fields as Array<{
+      page: number;
+      rect: { x: number; y: number; width: number; height: number };
+    }>) {
+      expect(f.page === 0 || f.page === 1).toBe(true);
+      expect(Number.isFinite(f.rect.x)).toBe(true);
+      expect(Number.isFinite(f.rect.y)).toBe(true);
+      expect(f.rect.width).toBeGreaterThan(0);
+      expect(f.rect.height).toBeGreaterThan(0);
+    }
+
+    // 2. Engine B render with dotted, underscored, nested, radio & right-aligned values
+    const renderRes = await fetch(`${baseUrl}/api/v1/render/tpl_alv_official`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({
+        outputMode: "flattened",
+        values: {
+          "owner.identificationType": "rsa_id",
+          "owner.identificationNumber": "8506155012089",
+          "vehicle.odometerReading": "12450",
+          owner: {
+            surnameOrOrganisation: "VAN DER MERWE",
+            initials: "J",
+          },
+          declaration_place: "CAPE TOWN",
+        },
+      }),
+    });
+    expect(renderRes.status).toBe(201);
+    const renderJson = await renderRes.json();
+    expect(renderJson.populatedWidgets).toBeGreaterThanOrEqual(6);
+
+    const renderedPdfRes = await fetch(`${baseUrl}${renderJson.downloadUrl}`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    expect(renderedPdfRes.status).toBe(200);
+    const pdfBuf = Buffer.from(await renderedPdfRes.arrayBuffer());
+    expect(pdfBuf.subarray(0, 5).toString("ascii")).toBe("%PDF-");
+
+    // 3. PUT /api/v1/supporting-documents/:id replacement + old storage cleanup
+    const listRes = await fetch(
+      `${baseUrl}/api/v1/supporting-documents?generatedDocumentId=${renderedGenId}`,
+      { headers: { Authorization: `Bearer ${adminToken}` } }
+    );
+    const listJson = await listRes.json();
+    const targetId = listJson.supportingDocuments[0].id as string;
+
+    const db = getDatabase(dbPath);
+    const beforeRow = db
+      .prepare("SELECT storage_key, sha256 FROM supporting_documents WHERE id = ?")
+      .get(targetId) as { storage_key: string; sha256: string };
+    const oldAbsPath = path.join(formforgeStorageDir, ...beforeRow.storage_key.split("/"));
+    expect(fs.existsSync(oldAbsPath)).toBe(true);
+
+    // Reject spoofed payload on PUT
+    const badPutForm = new FormData();
+    badPutForm.append("file", new Blob(["NOT_A_PNG"], { type: "image/png" }), "bad.png");
+    const badPutRes = await fetch(`${baseUrl}/api/v1/supporting-documents/${targetId}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${adminToken}` },
+      body: badPutForm,
+    });
+    expect(badPutRes.status).toBe(400);
+
+    // Valid PUT replacement with PDF
+    const replacePdf = await createSamplePdfBuffer("Replaced Attachment Proof:");
+    const goodPutForm = new FormData();
+    goodPutForm.append(
+      "file",
+      new Blob([new Uint8Array(replacePdf)], { type: "application/pdf" }),
+      "replaced_proof.pdf"
+    );
+    goodPutForm.append("category", "updated_proof");
+    const putRes = await fetch(`${baseUrl}/api/v1/supporting-documents/${targetId}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${adminToken}` },
+      body: goodPutForm,
+    });
+    expect(putRes.status).toBe(200);
+    const putJson = await putRes.json();
+    expect(putJson.supportingDocument.originalFilename).toBe("replaced_proof.pdf");
+    expect(putJson.supportingDocument.mimeType).toBe("application/pdf");
+    expect(putJson.supportingDocument.sha256).not.toBe(beforeRow.sha256);
+
+    // Old file and old storage_metadata row must have been removed
+    expect(fs.existsSync(oldAbsPath)).toBe(false);
+    const oldMeta = db
+      .prepare("SELECT id FROM storage_metadata WHERE storage_key = ?")
+      .get(beforeRow.storage_key);
+    expect(oldMeta).toBeUndefined();
+
+    // 4. Cross-tenant isolation: user in a second tenant cannot view, replace, or delete targetId
+    db.prepare("INSERT INTO tenants (id, name, slug) VALUES ('tenant_other', 'Other Org', 'other')").run();
+    const { hashPassword, createSessionForUser } = await import("../../src/server/auth.ts");
+    db.prepare(
+      `INSERT INTO users (id, tenant_id, email, full_name, role_name, password_hash, is_active)
+       VALUES ('usr_other_admin', 'tenant_other', 'other@other.test', 'Other Admin', 'administrator', ?, 1)`
+    ).run(hashPassword("OtherStrongPass123!"));
+    const otherSession = createSessionForUser("usr_other_admin", "tenant_other", {
+      headers: {},
+      ip: "127.0.0.1",
+    } as unknown as Parameters<typeof createSessionForUser>[2]);
+
+    const crossGet = await fetch(`${baseUrl}/api/v1/supporting-documents/${targetId}/download`, {
+      headers: { Authorization: `Bearer ${otherSession.token}` },
+    });
+    expect(crossGet.status).toBe(404);
+
+    const crossPut = await fetch(`${baseUrl}/api/v1/supporting-documents/${targetId}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${otherSession.token}` },
+      body: goodPutForm,
+    });
+    expect(crossPut.status).toBe(404);
+
+    const crossDel = await fetch(`${baseUrl}/api/v1/supporting-documents/${targetId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${otherSession.token}` },
+    });
+    expect(crossDel.status).toBe(404);
+
+    // 5. Deleting targetId removes both storage_metadata & physical file
+    const newRow = db
+      .prepare("SELECT storage_key FROM supporting_documents WHERE id = ?")
+      .get(targetId) as { storage_key: string };
+    const newAbsPath = path.join(formforgeStorageDir, ...newRow.storage_key.split("/"));
+    expect(fs.existsSync(newAbsPath)).toBe(true);
+
+    const delRes = await fetch(`${baseUrl}/api/v1/supporting-documents/${targetId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    expect(delRes.status).toBe(200);
+    expect(fs.existsSync(newAbsPath)).toBe(false);
+    expect(
+      db.prepare("SELECT id FROM storage_metadata WHERE storage_key = ?").get(newRow.storage_key)
+    ).toBeUndefined();
+  });
 });

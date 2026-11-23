@@ -213,89 +213,172 @@ function seedBaselineData(db: DatabaseSync) {
   seedAlvIntegrationTemplate(db);
 }
 
-function seedAlvIntegrationTemplate(db: DatabaseSync) {
-  const existing = db
-    .prepare("SELECT id FROM templates WHERE id = 'tpl_alv_official'")
-    .get();
-  if (existing) return;
+type RawRectInput =
+  | [number, number, number, number]
+  | { x0: number; y0: number; x1: number; y1: number };
 
-  const alvPdfPath = path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf");
-  const alvMapPath = path.resolve(process.cwd(), "src/lib/alv/field_map.json");
-  if (!fs.existsSync(alvPdfPath) || !fs.existsSync(alvMapPath)) {
-    return;
+function toTopLeftRect(raw: RawRectInput | undefined): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+} | null {
+  if (!raw) return null;
+  let x0: number;
+  let y0: number;
+  let x1: number;
+  let y1: number;
+  if (Array.isArray(raw) && raw.length >= 4) {
+    [x0, y0, x1, y1] = raw.map(Number);
+  } else if (typeof raw === "object" && "x0" in raw) {
+    x0 = Number(raw.x0);
+    y0 = Number(raw.y0);
+    x1 = Number(raw.x1);
+    y1 = Number(raw.y1);
+  } else {
+    return null;
   }
+  if (![x0, y0, x1, y1].every(Number.isFinite)) return null;
+  const round = (n: number) => Math.round(n * 100) / 100;
+  return {
+    x: round(x0),
+    y: round(y0),
+    width: round(Math.max(1, x1 - x0)),
+    height: round(Math.max(1, y1 - y0)),
+    x0,
+    y0,
+    x1,
+    y1,
+  };
+}
 
-  const pdfBytes = fs.readFileSync(alvPdfPath);
-  const pdfSha = crypto.createHash("sha256").update(pdfBytes).digest("hex");
-  const fieldMapRaw = JSON.parse(fs.readFileSync(alvMapPath, "utf-8")) as {
+function buildAlvSeedArtifacts(
+  pdfBytes: Buffer,
+  fieldMapRaw: {
     meta?: { totalPages?: number; totalAssignedCells?: number; totalSelectionBoxes?: number };
+    pageSizes?: Array<{ page: number; width: number; height: number }>;
     pages?: Array<{ pageIndex: number; width: number; height: number }>;
     fields?: Record<
       string,
       {
         kind?: string;
         page?: number;
-        cells?: Array<{ x0: number; y0: number; x1: number; y1: number; name?: string }>;
-        options?: Record<string, { x0: number; y0: number; x1: number; y1: number }>;
+        label?: string;
+        align?: string;
+        maxChars?: number;
+        capacity?: number;
+        rect?: RawRectInput;
+        cells?: RawRectInput[];
+        options?: Record<string, RawRectInput | { rect: RawRectInput; printedText?: string }>;
       }
     >;
-  };
-
+  }
+) {
   const fieldsList = Object.entries(fieldMapRaw.fields || {}).map(([key, cfg], idx) => {
-    const cells = cfg.cells || [];
+    const rawCells = cfg.cells || [];
+    const parsedCells = rawCells
+      .map((c) => toTopLeftRect(c))
+      .filter((c): c is NonNullable<typeof c> => c !== null);
+
     const optEntries = Object.entries(cfg.options || {});
-    let page = cfg.page ?? 0;
+    const optionRects: Record<string, { x: number; y: number; width: number; height: number }> = {};
+    const optBoxes: Array<NonNullable<ReturnType<typeof toTopLeftRect>>> = [];
+    for (const [optKey, optVal] of optEntries) {
+      const rawOptRect =
+        optVal && typeof optVal === "object" && "rect" in optVal
+          ? optVal.rect
+          : (optVal as RawRectInput);
+      const parsed = toTopLeftRect(rawOptRect);
+      if (parsed) {
+        optionRects[optKey] = {
+          x: parsed.x,
+          y: parsed.y,
+          width: parsed.width,
+          height: parsed.height,
+        };
+        optBoxes.push(parsed);
+      }
+    }
+
+    const rawPage = Number(cfg.page ?? 1);
+    const page = Number.isFinite(rawPage) && rawPage >= 1 ? rawPage - 1 : Math.max(0, rawPage);
     let rect = { x: 40, y: 40, width: 180, height: 18 };
     let cellRects: Array<{ x: number; y: number; width: number; height: number }> | undefined;
 
-    if (cells.length > 0) {
-      const minX = Math.min(...cells.map((c) => c.x0));
-      const minY = Math.min(...cells.map((c) => c.y0));
-      const maxX = Math.max(...cells.map((c) => c.x1));
-      const maxY = Math.max(...cells.map((c) => c.y1));
+    if (parsedCells.length > 0) {
+      const minX = Math.min(...parsedCells.map((c) => c.x0));
+      const minY = Math.min(...parsedCells.map((c) => c.y0));
+      const maxX = Math.max(...parsedCells.map((c) => c.x1));
+      const maxY = Math.max(...parsedCells.map((c) => c.y1));
       rect = {
         x: Math.round(minX * 100) / 100,
         y: Math.round(minY * 100) / 100,
-        width: Math.round((maxX - minX) * 100) / 100,
-        height: Math.round((maxY - minY) * 100) / 100,
+        width: Math.round(Math.max(1, maxX - minX) * 100) / 100,
+        height: Math.round(Math.max(1, maxY - minY) * 100) / 100,
       };
-      cellRects = cells.map((c) => ({
-        x: Math.round(c.x0 * 100) / 100,
-        y: Math.round(c.y0 * 100) / 100,
-        width: Math.round((c.x1 - c.x0) * 100) / 100,
-        height: Math.round((c.y1 - c.y0) * 100) / 100,
+      cellRects = parsedCells.map((c) => ({
+        x: c.x,
+        y: c.y,
+        width: c.width,
+        height: c.height,
       }));
-    } else if (optEntries.length > 0) {
-      const boxes = optEntries.map(([, b]) => b);
-      const minX = Math.min(...boxes.map((c) => c.x0));
-      const minY = Math.min(...boxes.map((c) => c.y0));
-      const maxX = Math.max(...boxes.map((c) => c.x1));
-      const maxY = Math.max(...boxes.map((c) => c.y1));
+    } else if (optBoxes.length > 0) {
+      const minX = Math.min(...optBoxes.map((c) => c.x0));
+      const minY = Math.min(...optBoxes.map((c) => c.y0));
+      const maxX = Math.max(...optBoxes.map((c) => c.x1));
+      const maxY = Math.max(...optBoxes.map((c) => c.y1));
       rect = {
         x: Math.round(minX * 100) / 100,
         y: Math.round(minY * 100) / 100,
-        width: Math.round((maxX - minX) * 100) / 100,
-        height: Math.round((maxY - minY) * 100) / 100,
+        width: Math.round(Math.max(1, maxX - minX) * 100) / 100,
+        height: Math.round(Math.max(1, maxY - minY) * 100) / 100,
       };
+    } else if (cfg.rect) {
+      const parsedFree = toTopLeftRect(cfg.rect);
+      if (parsedFree) {
+        rect = {
+          x: parsedFree.x,
+          y: parsedFree.y,
+          width: parsedFree.width,
+          height: parsedFree.height,
+        };
+      }
     }
 
+    const isBooleanBox = optEntries.length === 1 && optEntries[0][0] === "true";
     const fieldType =
-      cfg.kind === "selection"
-        ? "radio"
-        : cfg.kind === "date_yymmdd"
-        ? "date"
-        : cells.length > 1
-        ? "char_cells"
-        : "text";
+      cfg.kind === "selection_box" || cfg.kind === "selection"
+        ? isBooleanBox
+          ? ("checkbox" as const)
+          : ("radio" as const)
+        : cfg.kind === "date_cells" || cfg.kind === "date_yymmdd"
+        ? ("date" as const)
+        : parsedCells.length > 1
+        ? ("char_cells" as const)
+        : ("text" as const);
+
+    const maxLen =
+      parsedCells.length > 0
+        ? parsedCells.length
+        : typeof cfg.maxChars === "number" && cfg.maxChars > 0
+        ? cfg.maxChars
+        : typeof cfg.capacity === "number" && cfg.capacity > 0
+        ? cfg.capacity
+        : undefined;
 
     return {
       id: `alv_field_${String(idx + 1).padStart(3, "0")}`,
       name: key.replace(/\./g, "_"),
-      label: key,
+      label: cfg.label || key,
       type: fieldType,
       page,
       rect,
       cellRects,
+      optionRects: Object.keys(optionRects).length > 0 ? optionRects : undefined,
       coordinateSpace: "top_left_pdf_pt" as const,
       originalLabelText: key,
       detectionSource: "existing_acroform" as const,
@@ -304,15 +387,32 @@ function seedAlvIntegrationTemplate(db: DatabaseSync) {
       confidenceEvidence: ["Pre-calibrated official ALV_blank.pdf field_map.json"],
       required: false,
       defaultValue: "",
-      maxLength: cells.length > 0 ? cells.length : undefined,
+      maxLength: maxLen,
       multiline: false,
       options: optEntries.map(([k]) => k),
       validation: {},
+      alignment: (cfg.align === "right" ? "right" : cfg.align === "center" ? "center" : "left") as
+        | "left"
+        | "center"
+        | "right",
       reviewStatus: "accepted" as const,
     };
   });
 
-  const pages = (fieldMapRaw.pages || []).map((p) => ({
+  const rawPages =
+    fieldMapRaw.pageSizes && fieldMapRaw.pageSizes.length > 0
+      ? fieldMapRaw.pageSizes.map((p) => ({
+          pageIndex: Math.max(0, Number(p.page) - 1),
+          width: Number(p.width),
+          height: Number(p.height),
+        }))
+      : (fieldMapRaw.pages || []).map((p) => ({
+          pageIndex: Math.max(0, Number(p.pageIndex)),
+          width: Number(p.width),
+          height: Number(p.height),
+        }));
+
+  const pages = rawPages.map((p) => ({
     pageIndex: p.pageIndex,
     widthPt: p.width,
     heightPt: p.height,
@@ -347,6 +447,68 @@ function seedAlvIntegrationTemplate(db: DatabaseSync) {
     },
   };
 
+  return {
+    fieldsList,
+    pages,
+    manifestObj,
+    pdfSha: crypto.createHash("sha256").update(pdfBytes).digest("hex"),
+    totalWidgets:
+      (fieldMapRaw.meta?.totalAssignedCells ?? 690) +
+      (fieldMapRaw.meta?.totalSelectionBoxes ?? 20),
+  };
+}
+
+function seedAlvIntegrationTemplate(db: DatabaseSync) {
+  const alvPdfPath = path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf");
+  const alvMapPath = path.resolve(process.cwd(), "src/lib/alv/field_map.json");
+  if (!fs.existsSync(alvPdfPath) || !fs.existsSync(alvMapPath)) {
+    return;
+  }
+
+  const existingTpl = db
+    .prepare("SELECT id FROM templates WHERE id = 'tpl_alv_official'")
+    .get();
+  if (existingTpl) {
+    // Check if an older seed left manifest_alv_v1 with empty pages or null/1-indexed geometry and repair non-destructively
+    const manRow = db
+      .prepare("SELECT manifest_json FROM field_manifests WHERE id = 'manifest_alv_v1'")
+      .get() as { manifest_json: string } | undefined;
+    if (!manRow) return;
+    try {
+      const parsedMan = JSON.parse(manRow.manifest_json) as {
+        pages?: unknown[];
+        fields?: Array<{ page?: number; rect?: { x?: unknown }; optionRects?: unknown }>;
+      };
+      const hasValidPages = Array.isArray(parsedMan.pages) && parsedMan.pages.length >= 2;
+      const hasValidCoords =
+        Array.isArray(parsedMan.fields) &&
+        parsedMan.fields.length > 0 &&
+        parsedMan.fields.every(
+          (f) =>
+            typeof f.rect?.x === "number" &&
+            Number.isFinite(f.rect.x) &&
+            typeof f.page === "number" &&
+            f.page >= 0 &&
+            f.page < (parsedMan.pages?.length || 2)
+        );
+      const hasOptionRects = Boolean(
+        parsedMan.fields?.some((f) => f.optionRects && typeof f.optionRects === "object")
+      );
+      if (hasValidPages && hasValidCoords && hasOptionRects) {
+        return;
+      }
+    } catch {
+      // Repair corrupt JSON below
+    }
+  }
+
+  const pdfBytes = fs.readFileSync(alvPdfPath);
+  const fieldMapRaw = JSON.parse(fs.readFileSync(alvMapPath, "utf-8"));
+  const { fieldsList, pages, manifestObj, pdfSha, totalWidgets } = buildAlvSeedArtifacts(
+    pdfBytes,
+    fieldMapRaw
+  );
+
   db.exec("BEGIN;");
   try {
     db.prepare(`
@@ -362,6 +524,10 @@ function seedAlvIntegrationTemplate(db: DatabaseSync) {
       pdfBytes.length,
       pages.length || 2,
       "src/lib/alv/ALV_blank.pdf"
+    );
+
+    db.prepare("UPDATE documents SET page_count = ? WHERE id = 'doc_alv_official'").run(
+      pages.length || 2
     );
 
     for (const p of pages) {
@@ -395,6 +561,12 @@ function seedAlvIntegrationTemplate(db: DatabaseSync) {
     `).run(JSON.stringify(manifestObj), fieldsList.length, fieldsList.length);
 
     db.prepare(`
+      UPDATE field_manifests
+      SET manifest_json = ?, field_count = ?, high_confidence_count = ?
+      WHERE id = 'manifest_alv_v1'
+    `).run(JSON.stringify(manifestObj), fieldsList.length, fieldsList.length);
+
+    db.prepare(`
       INSERT OR IGNORE INTO acroform_assets (
         id, tenant_id, document_id, storage_key, sha256, byte_size, widget_count, validation_report_json
       ) VALUES ('asset_alv_v1', 'tenant_default', 'doc_alv_official', ?, ?, ?, ?, ?)
@@ -402,12 +574,11 @@ function seedAlvIntegrationTemplate(db: DatabaseSync) {
       "src/lib/alv/ALV_blank.pdf",
       pdfSha,
       pdfBytes.length,
-      (fieldMapRaw.meta?.totalAssignedCells ?? 690) +
-        (fieldMapRaw.meta?.totalSelectionBoxes ?? 20),
+      totalWidgets,
       JSON.stringify({
         validPdf: true,
         hasAcroFormDict: true,
-        widgetCount: 710,
+        widgetCount: totalWidgets,
         expectedFieldCount: fieldsList.length,
         missingFields: [],
         appearanceStreamsVerified: true,

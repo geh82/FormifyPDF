@@ -82,23 +82,87 @@ const CreateTemplateSchema = z.object({
   outputPolicy: z.enum(["flattened", "fillable", "both"]).default("flattened"),
 });
 
+function deleteSupportingRecordAssets(
+  db: ReturnType<typeof getDatabase>,
+  tenantId: string,
+  row: { id: string; storage_key: string }
+) {
+  deleteStorageObject(row.storage_key);
+  db.prepare("DELETE FROM storage_metadata WHERE tenant_id = ? AND storage_key = ?").run(
+    tenantId,
+    row.storage_key
+  );
+  db.prepare("DELETE FROM supporting_documents WHERE id = ? AND tenant_id = ?").run(
+    row.id,
+    tenantId
+  );
+}
+
+function cleanupDocumentStorageChildren(
+  db: ReturnType<typeof getDatabase>,
+  tenantId: string,
+  documentId: string
+) {
+  const thumbRows = db
+    .prepare(
+      "SELECT thumbnail_key FROM document_pages WHERE document_id = ? AND thumbnail_key IS NOT NULL"
+    )
+    .all(documentId) as Array<{ thumbnail_key: string }>;
+  for (const tr of thumbRows) {
+    deleteStorageObject(tr.thumbnail_key);
+    db.prepare("DELETE FROM storage_metadata WHERE tenant_id = ? AND storage_key = ?").run(
+      tenantId,
+      tr.thumbnail_key
+    );
+  }
+
+  const supRows = db
+    .prepare("SELECT id, storage_key FROM supporting_documents WHERE document_id = ? AND tenant_id = ?")
+    .all(documentId, tenantId) as Array<{ id: string; storage_key: string }>;
+  for (const sr of supRows) {
+    deleteSupportingRecordAssets(db, tenantId, sr);
+  }
+
+  const assetRows = db
+    .prepare(
+      `SELECT aa.id, aa.storage_key
+       FROM acroform_assets aa
+       WHERE aa.document_id = ? AND aa.tenant_id = ?
+         AND NOT EXISTS (SELECT 1 FROM template_versions tv WHERE tv.acroform_asset_id = aa.id)`
+    )
+    .all(documentId, tenantId) as Array<{ id: string; storage_key: string }>;
+  for (const ar of assetRows) {
+    if (!ar.storage_key.startsWith("src/")) {
+      deleteStorageObject(ar.storage_key);
+      db.prepare("DELETE FROM storage_metadata WHERE tenant_id = ? AND storage_key = ?").run(
+        tenantId,
+        ar.storage_key
+      );
+    }
+    db.prepare("DELETE FROM acroform_assets WHERE id = ? AND tenant_id = ?").run(ar.id, tenantId);
+  }
+}
+
 export function purgeExpiredDocuments(tenantId: string): {
   deletedDocuments: number;
   deletedGenerated: number;
+  deletedSupporting: number;
 } {
   const db = getDatabase();
-  const expiredDocs = db
+  let deletedDocuments = 0;
+  let deletedGenerated = 0;
+  let deletedSupporting = 0;
+
+  const expiredSup = db
     .prepare(
-      `SELECT id, source_storage_key FROM documents
+      `SELECT id, storage_key FROM supporting_documents
        WHERE tenant_id = ? AND retention_expires_at IS NOT NULL AND retention_expires_at <= datetime('now')`
     )
-    .all(tenantId) as Array<{ id: string; source_storage_key: string }>;
+    .all(tenantId) as Array<{ id: string; storage_key: string }>;
 
-  for (const d of expiredDocs) {
-    if (!d.source_storage_key.startsWith("src/")) {
-      deleteStorageObject(d.source_storage_key);
-    }
-    db.prepare("DELETE FROM documents WHERE id = ?").run(d.id);
+  for (const s of expiredSup) {
+    deleteSupportingRecordAssets(db, tenantId, s);
+    deletedSupporting++;
   }
 
   const expiredGen = db
@@ -109,26 +173,88 @@ export function purgeExpiredDocuments(tenantId: string): {
     .all(tenantId) as Array<{ id: string; storage_key: string }>;
 
   for (const g of expiredGen) {
+    const childSigned = db
+      .prepare("SELECT storage_key FROM signed_uploads WHERE generated_document_id = ? AND tenant_id = ?")
+      .all(g.id, tenantId) as Array<{ storage_key: string }>;
+    for (const cs of childSigned) {
+      deleteStorageObject(cs.storage_key);
+      db.prepare("DELETE FROM storage_metadata WHERE tenant_id = ? AND storage_key = ?").run(
+        tenantId,
+        cs.storage_key
+      );
+    }
+
+    const childSup = db
+      .prepare(
+        "SELECT id, storage_key FROM supporting_documents WHERE generated_document_id = ? AND tenant_id = ?"
+      )
+      .all(g.id, tenantId) as Array<{ id: string; storage_key: string }>;
+    for (const sup of childSup) {
+      deleteSupportingRecordAssets(db, tenantId, sup);
+      deletedSupporting++;
+    }
+
     deleteStorageObject(g.storage_key);
-    db.prepare("DELETE FROM generated_documents WHERE id = ?").run(g.id);
+    db.prepare("DELETE FROM storage_metadata WHERE tenant_id = ? AND storage_key = ?").run(
+      tenantId,
+      g.storage_key
+    );
+    db.prepare("DELETE FROM generated_documents WHERE id = ? AND tenant_id = ?").run(g.id, tenantId);
+    deletedGenerated++;
   }
 
-  const expiredSup = db
+  const expiredDocs = db
     .prepare(
-      `SELECT id, storage_key FROM supporting_documents
-       WHERE tenant_id = ? AND retention_expires_at IS NOT NULL AND retention_expires_at <= datetime('now')`
+      `SELECT d.id, d.source_storage_key FROM documents d
+       WHERE d.tenant_id = ?
+         AND d.retention_expires_at IS NOT NULL
+         AND d.retention_expires_at <= datetime('now')
+         AND NOT EXISTS (
+           SELECT 1
+           FROM template_versions tv
+           JOIN field_manifests fm ON fm.id = tv.manifest_id
+           WHERE fm.document_id = d.id
+         )`
     )
-    .all(tenantId) as Array<{ id: string; storage_key: string }>;
+    .all(tenantId) as Array<{ id: string; source_storage_key: string }>;
 
-  for (const s of expiredSup) {
-    deleteStorageObject(s.storage_key);
-    db.prepare("DELETE FROM supporting_documents WHERE id = ?").run(s.id);
+  for (const d of expiredDocs) {
+    cleanupDocumentStorageChildren(db, tenantId, d.id);
+    if (!d.source_storage_key.startsWith("src/")) {
+      deleteStorageObject(d.source_storage_key);
+      db.prepare("DELETE FROM storage_metadata WHERE tenant_id = ? AND storage_key = ?").run(
+        tenantId,
+        d.source_storage_key
+      );
+    }
+    db.prepare("DELETE FROM documents WHERE id = ? AND tenant_id = ?").run(d.id, tenantId);
+    deletedDocuments++;
   }
 
   return {
-    deletedDocuments: expiredDocs.length,
-    deletedGenerated: expiredGen.length,
+    deletedDocuments,
+    deletedGenerated,
+    deletedSupporting,
   };
+}
+
+export function purgeAllTenantsExpiredDocuments(): {
+  deletedDocuments: number;
+  deletedGenerated: number;
+  deletedSupporting: number;
+} {
+  const db = getDatabase();
+  const tenants = db.prepare("SELECT id FROM tenants").all() as Array<{ id: string }>;
+  let deletedDocuments = 0;
+  let deletedGenerated = 0;
+  let deletedSupporting = 0;
+  for (const t of tenants) {
+    const res = purgeExpiredDocuments(t.id);
+    deletedDocuments += res.deletedDocuments;
+    deletedGenerated += res.deletedGenerated;
+    deletedSupporting += res.deletedSupporting;
+  }
+  return { deletedDocuments, deletedGenerated, deletedSupporting };
 }
 
 function sanitizeHeaderFilename(rawName: string, fallback = "document.pdf"): string {
@@ -253,6 +379,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
           get: { summary: "Download supporting document attachment securely" },
         },
         "/supporting-documents/{id}": {
+          put: { summary: "Replace an existing supporting document attachment" },
           delete: { summary: "Delete supporting document attachment" },
         },
       },
@@ -701,13 +828,13 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       }
       if (parsed.data.role) {
         db.prepare(
-          "UPDATE users SET role_name = ?, updated_at = datetime('now') WHERE id = ?"
-        ).run(parsed.data.role, req.params.id);
+          "UPDATE users SET role_name = ?, updated_at = datetime('now') WHERE id = ? AND tenant_id = ?"
+        ).run(parsed.data.role, req.params.id, req.principal!.tenantId);
       }
       if (typeof parsed.data.isActive === "boolean") {
         db.prepare(
-          "UPDATE users SET is_active = ?, updated_at = datetime('now') WHERE id = ?"
-        ).run(parsed.data.isActive ? 1 : 0, req.params.id);
+          "UPDATE users SET is_active = ?, updated_at = datetime('now') WHERE id = ? AND tenant_id = ?"
+        ).run(parsed.data.isActive ? 1 : 0, req.params.id, req.principal!.tenantId);
       }
       logAuditEvent({
         tenantId: req.principal!.tenantId,
@@ -1133,8 +1260,30 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         res.status(400).json({ ok: false, error: "System integration source PDF cannot be deleted" });
         return;
       }
+      const linkedTpl = db
+        .prepare(
+          `SELECT tv.id FROM template_versions tv
+           JOIN field_manifests fm ON fm.id = tv.manifest_id
+           WHERE fm.document_id = ? LIMIT 1`
+        )
+        .get(doc.id);
+      if (linkedTpl) {
+        res.status(409).json({
+          ok: false,
+          error: "Cannot delete document while a template version references its manifest.",
+        });
+        return;
+      }
+      cleanupDocumentStorageChildren(db, req.principal!.tenantId, doc.id);
       deleteStorageObject(doc.source_storage_key);
-      db.prepare("DELETE FROM documents WHERE id = ?").run(doc.id);
+      db.prepare("DELETE FROM storage_metadata WHERE tenant_id = ? AND storage_key = ?").run(
+        req.principal!.tenantId,
+        doc.source_storage_key
+      );
+      db.prepare("DELETE FROM documents WHERE id = ? AND tenant_id = ?").run(
+        doc.id,
+        req.principal!.tenantId
+      );
       logAuditEvent({
         tenantId: req.principal!.tenantId,
         actorUserId: req.principal!.userId,
@@ -1758,8 +1907,8 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         `).run(verId, tpl.id, nextVer, latestMan.id, gen.assetId, changelog, req.principal!.userId);
 
         db.prepare(
-          "UPDATE templates SET current_version_number = ?, updated_at = datetime('now') WHERE id = ?"
-        ).run(nextVer, tpl.id);
+          "UPDATE templates SET current_version_number = ?, updated_at = datetime('now') WHERE id = ? AND tenant_id = ?"
+        ).run(nextVer, tpl.id, tid);
         db.exec("COMMIT;");
       } catch (err) {
         db.exec("ROLLBACK;");
@@ -1843,8 +1992,8 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
           "UPDATE template_versions SET is_approved = 1, is_locked = 1 WHERE id = ?"
         ).run(ver.id);
         db.prepare(
-          "UPDATE templates SET status = 'approved', updated_at = datetime('now') WHERE id = ?"
-        ).run(tpl.id);
+          "UPDATE templates SET status = 'approved', updated_at = datetime('now') WHERE id = ? AND tenant_id = ?"
+        ).run(tpl.id, tid);
         db.prepare(`
           INSERT INTO template_approvals (
             id, template_id, template_version_id, approved_by, structural_verified, visual_verified, notes
@@ -1976,14 +2125,15 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       db.prepare(`
         UPDATE templates
         SET status = ?, output_policy = ?, category = ?, tags_json = ?, name = ?, updated_at = datetime('now')
-        WHERE id = ?
+        WHERE id = ? AND tenant_id = ?
       `).run(
         parsed.data.status ?? tpl.status,
         parsed.data.outputPolicy ?? tpl.output_policy,
         parsed.data.category ?? tpl.category,
         parsed.data.tags ? JSON.stringify(parsed.data.tags) : tpl.tags_json,
         parsed.data.name ?? tpl.name,
-        tpl.id
+        tpl.id,
+        req.principal!.tenantId
       );
 
       res.json({ ok: true });
@@ -2012,7 +2162,10 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         });
         return;
       }
-      db.prepare("DELETE FROM templates WHERE id = ?").run(tpl.id);
+      db.prepare("DELETE FROM templates WHERE id = ? AND tenant_id = ?").run(
+        tpl.id,
+        req.principal!.tenantId
+      );
       res.json({ ok: true });
     }
   );
@@ -2168,10 +2321,30 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       const manifest = JSON.parse(row.manifest_json) as FieldManifest;
       const values = (req.body?.values || {}) as Record<string, unknown>;
 
-      // Validate required fields
+      // Flatten nested objects (e.g. { owner: { surname: "X" } }) into dotted and underscored keys
+      const flatLookup: Record<string, unknown> = {};
+      const flattenInto = (obj: Record<string, unknown>, prefix = "") => {
+        for (const [k, v] of Object.entries(obj)) {
+          const dotted = prefix ? `${prefix}.${k}` : k;
+          if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+            flattenInto(v as Record<string, unknown>, dotted);
+          } else {
+            flatLookup[dotted] = v;
+            const underscored = dotted.replace(/\./g, "_");
+            if (!(underscored in flatLookup)) flatLookup[underscored] = v;
+          }
+        }
+      };
+      flattenInto(values);
+
+      // Validate required fields across underscored, dotted, id, and originalLabelText keys
       for (const fld of manifest.fields) {
         if (fld.required) {
-          const val = values[fld.name];
+          const val =
+            flatLookup[fld.name] ??
+            flatLookup[fld.id] ??
+            (fld.originalLabelText ? flatLookup[fld.originalLabelText] : undefined) ??
+            flatLookup[fld.name.replace(/_/g, ".")];
           if (val === undefined || val === null || String(val).trim() === "") {
             res.status(400).json({
               ok: false,
@@ -2698,6 +2871,174 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     }
   );
 
+  router.put(
+    "/supporting-documents/:id",
+    limiter,
+    requireAuth,
+    requirePermission("documents:write"),
+    (req: AuthedRequest, res) => {
+      supportingUpload.fields([
+        { name: "file", maxCount: 1 },
+        { name: "files", maxCount: 1 },
+      ])(req, res, (multerErr: unknown) => {
+        if (multerErr) {
+          if (
+            multerErr instanceof multer.MulterError &&
+            multerErr.code === "LIMIT_FILE_SIZE"
+          ) {
+            res.status(413).json({
+              ok: false,
+              error: `Supporting file exceeds maximum size of ${Math.round(
+                maxSupportingBytes / (1024 * 1024)
+              )} MB.`,
+            });
+            return;
+          }
+          res.status(400).json({
+            ok: false,
+            error:
+              multerErr instanceof Error
+                ? multerErr.message
+                : "Invalid multipart supporting-document replacement",
+          });
+          return;
+        }
+
+        const fileMap = (req.files || {}) as Record<string, Express.Multer.File[]>;
+        const file = (fileMap.file || [])[0] || (fileMap.files || [])[0];
+        if (!file || !file.buffer) {
+          res.status(400).json({
+            ok: false,
+            error: "A replacement supporting document file (PDF, PNG, JPEG, or WebP) is required.",
+          });
+          return;
+        }
+
+        const db = getDatabase();
+        const tid = req.principal!.tenantId;
+        const existing = db
+          .prepare(
+            `SELECT id, category, storage_key, retention_expires_at
+             FROM supporting_documents
+             WHERE id = ? AND tenant_id = ?`
+          )
+          .get(req.params.id, tid) as
+          | {
+              id: string;
+              category: string;
+              storage_key: string;
+              retention_expires_at: string | null;
+            }
+          | undefined;
+
+        if (!existing) {
+          res.status(404).json({ ok: false, error: "Supporting document not found" });
+          return;
+        }
+
+        const sig = validateSupportingFileSignature(
+          file.buffer,
+          file.originalname,
+          file.mimetype
+        );
+        if (!sig.valid || !sig.mimeType) {
+          res.status(400).json({
+            ok: false,
+            error: `${sanitizeHeaderFilename(file.originalname)}: ${sig.reason || "Invalid file"}`,
+          });
+          return;
+        }
+
+        const nextCategory =
+          typeof req.body?.category === "string" && req.body.category.trim()
+            ? req.body.category.trim().slice(0, 64)
+            : existing.category;
+        const safeName = sanitizeHeaderFilename(file.originalname, "supporting.bin");
+        const stored = saveStorageBuffer("supporting", safeName, file.buffer);
+
+        const tenant = db
+          .prepare("SELECT retention_days FROM tenants WHERE id = ?")
+          .get(tid) as { retention_days: number } | undefined;
+        const expiresAt =
+          existing.retention_expires_at ||
+          new Date(Date.now() + (tenant?.retention_days ?? 30) * 24 * 60 * 60 * 1000).toISOString();
+
+        db.exec("BEGIN IMMEDIATE;");
+        try {
+          db.prepare(
+            `UPDATE supporting_documents
+             SET original_filename = ?, mime_type = ?, storage_key = ?, sha256 = ?,
+                 byte_size = ?, category = ?, uploaded_by = ?, retention_expires_at = ?
+             WHERE id = ? AND tenant_id = ?`
+          ).run(
+            safeName,
+            sig.mimeType,
+            stored.storageKey,
+            stored.sha256,
+            stored.byteSize,
+            nextCategory,
+            req.principal!.userId,
+            expiresAt,
+            existing.id,
+            tid
+          );
+
+          db.prepare("DELETE FROM storage_metadata WHERE tenant_id = ? AND storage_key = ?").run(
+            tid,
+            existing.storage_key
+          );
+          db.prepare(
+            `INSERT INTO storage_metadata (
+              id, tenant_id, provider, storage_key, bucket_or_dir, content_type, byte_size, sha256, classification, retention_expires_at
+            ) VALUES (?, ?, 'local', ?, 'supporting', ?, ?, ?, 'supporting', ?)`
+          ).run(
+            `stm_${crypto.randomBytes(8).toString("hex")}`,
+            tid,
+            stored.storageKey,
+            sig.mimeType,
+            stored.byteSize,
+            stored.sha256,
+            expiresAt
+          );
+          db.exec("COMMIT;");
+        } catch (err) {
+          db.exec("ROLLBACK;");
+          deleteStorageObject(stored.storageKey);
+          console.error("[Supporting Document Replace Error]", err);
+          res.status(500).json({ ok: false, error: "Failed to replace supporting document" });
+          return;
+        }
+
+        if (existing.storage_key !== stored.storageKey) {
+          deleteStorageObject(existing.storage_key);
+        }
+
+        logAuditEvent({
+          tenantId: tid,
+          actorUserId: req.principal!.userId,
+          actorEmail: req.principal!.email,
+          action: "supporting_document.replaced",
+          resourceType: "supporting_document",
+          resourceId: existing.id,
+          metadata: { filename: safeName, mimeType: sig.mimeType, byteSize: stored.byteSize },
+        });
+
+        res.json({
+          ok: true,
+          supportingDocument: {
+            id: existing.id,
+            originalFilename: safeName,
+            mimeType: sig.mimeType,
+            byteSize: stored.byteSize,
+            sha256: stored.sha256,
+            category: nextCategory,
+            downloadUrl: `/api/v1/supporting-documents/${existing.id}/download`,
+          },
+        });
+      });
+    }
+  );
+
   router.delete(
     "/supporting-documents/:id",
     requireAuth,
@@ -2716,8 +3057,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         return;
       }
 
-      deleteStorageObject(row.storage_key);
-      db.prepare("DELETE FROM supporting_documents WHERE id = ?").run(row.id);
+      deleteSupportingRecordAssets(db, req.principal!.tenantId, row);
 
       logAuditEvent({
         tenantId: req.principal!.tenantId,

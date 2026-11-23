@@ -41,6 +41,10 @@ export const DetectedFormFieldSchema = z.object({
     .array(PdfRectSchema)
     .nullish()
     .transform((v) => v ?? undefined),
+  optionRects: z
+    .record(z.string(), PdfRectSchema)
+    .nullish()
+    .transform((v) => v ?? undefined),
   coordinateSpace: z.literal("top_left_pdf_pt").default("top_left_pdf_pt"),
   originalLabelText: z
     .string()

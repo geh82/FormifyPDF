@@ -139,6 +139,17 @@ export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
   } | null>(null);
   const [renderedPreviewUrl, setRenderedPreviewUrl] = useState<string | null>(null);
   const [signedUploadMsg, setSignedUploadMsg] = useState<string | null>(null);
+  const [supportingDocs, setSupportingDocs] = useState<
+    Array<{
+      id: string;
+      original_filename: string;
+      mime_type: string;
+      byte_size: number;
+      category: string;
+      created_at: string;
+    }>
+  >([]);
+  const [supportingBusy, setSupportingBusy] = useState(false);
 
   // API & Integrations state
   const [apiKeys, setApiKeys] = useState<Array<Record<string, unknown>>>([]);
@@ -549,11 +560,15 @@ export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
     }
   };
 
-  const handleDownloadProtectedBlob = async (url: string, filename: string) => {
+  const handleDownloadProtectedBlob = async (
+    url: string,
+    filename: string,
+    mimeType = "application/pdf"
+  ) => {
     try {
       const bytes = await api.fetchPdfBytes(url);
       const blobUrl = URL.createObjectURL(
-        new Blob([bytes.slice()], { type: "application/pdf" })
+        new Blob([bytes.slice()], { type: mimeType })
       );
       const a = document.createElement("a");
       a.href = blobUrl;
@@ -564,6 +579,90 @@ export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
       setTimeout(() => URL.revokeObjectURL(blobUrl), 2500);
     } catch (err) {
       setStudioError(err instanceof Error ? err.message : "Download failed");
+    }
+  };
+
+  const refreshSupportingDocs = useCallback(
+    async (generatedDocumentId: string) => {
+      try {
+        const res = await api.json<{
+          ok: boolean;
+          supportingDocuments: typeof supportingDocs;
+        }>(`/api/v1/supporting-documents?generatedDocumentId=${encodeURIComponent(generatedDocumentId)}`);
+        setSupportingDocs(res.supportingDocuments || []);
+      } catch {
+        setSupportingDocs([]);
+      }
+    },
+    [api]
+  );
+
+  useEffect(() => {
+    if (activeNav === "generation" && latestRendered?.generatedDocumentId) {
+      void refreshSupportingDocs(latestRendered.generatedDocumentId);
+    } else {
+      setSupportingDocs([]);
+    }
+  }, [activeNav, latestRendered?.generatedDocumentId, refreshSupportingDocs]);
+
+  const handleUploadSupportingFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0 || !latestRendered) return;
+    setStudioError(null);
+    setSupportingBusy(true);
+    try {
+      const form = new FormData();
+      form.append("generatedDocumentId", latestRendered.generatedDocumentId);
+      form.append("category", "supporting");
+      for (const f of Array.from(files)) {
+        form.append("files", f);
+      }
+      await api.json("/api/v1/supporting-documents", {
+        method: "POST",
+        body: form,
+      });
+      await refreshSupportingDocs(latestRendered.generatedDocumentId);
+      setNotice(`Attached ${files.length} supporting document(s).`);
+    } catch (err) {
+      setStudioError(err instanceof Error ? err.message : "Supporting upload failed");
+    } finally {
+      setSupportingBusy(false);
+    }
+  };
+
+  const handleReplaceSupportingFile = async (supId: string, file: File) => {
+    if (!latestRendered) return;
+    setStudioError(null);
+    setSupportingBusy(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      await api.json(`/api/v1/supporting-documents/${supId}`, {
+        method: "PUT",
+        body: form,
+      });
+      await refreshSupportingDocs(latestRendered.generatedDocumentId);
+      setNotice(`Replaced supporting attachment with ${file.name}.`);
+    } catch (err) {
+      setStudioError(err instanceof Error ? err.message : "Replacement upload failed");
+    } finally {
+      setSupportingBusy(false);
+    }
+  };
+
+  const handleDeleteSupportingFile = async (supId: string) => {
+    if (!latestRendered) return;
+    setStudioError(null);
+    setSupportingBusy(true);
+    try {
+      await api.json(`/api/v1/supporting-documents/${supId}`, {
+        method: "DELETE",
+      });
+      await refreshSupportingDocs(latestRendered.generatedDocumentId);
+      setNotice("Supporting document deleted.");
+    } catch (err) {
+      setStudioError(err instanceof Error ? err.message : "Failed to delete supporting document");
+    } finally {
+      setSupportingBusy(false);
     }
   };
 
@@ -1592,7 +1691,7 @@ export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
                               }
                               className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-slate-900"
                             />
-                          ) : f.type === "dropdown" && f.options.length > 0 ? (
+                          ) : (f.type === "dropdown" || f.type === "radio") && f.options.length > 0 ? (
                             <select
                               required={f.required}
                               value={String(genValues[f.name] ?? "")}
@@ -1688,6 +1787,87 @@ export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
                           <p className="mt-1.5 text-xs font-medium text-emerald-800">
                             {signedUploadMsg}
                           </p>
+                        )}
+                      </div>
+
+                      <div className="border-t border-slate-100 pt-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="block text-xs font-medium text-slate-700">
+                            Supporting Documents (PDF, PNG, JPEG, WebP)
+                          </label>
+                          {supportingBusy && (
+                            <span className="text-[11px] text-slate-500">Processing...</span>
+                          )}
+                        </div>
+                        {hasPermission("documents:write") && (
+                          <input
+                            type="file"
+                            multiple
+                            accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp"
+                            onChange={(e) => {
+                              void handleUploadSupportingFiles(e.target.files);
+                              e.target.value = "";
+                            }}
+                            className="block w-full text-xs text-slate-600"
+                          />
+                        )}
+                        {supportingDocs.length > 0 && (
+                          <div className="divide-y divide-slate-100 rounded border border-slate-200 text-xs">
+                            {supportingDocs.map((sd) => (
+                              <div
+                                key={sd.id}
+                                className="px-3 py-2 flex flex-wrap items-center justify-between gap-2"
+                              >
+                                <div className="min-w-0">
+                                  <p className="font-medium text-slate-900 truncate">
+                                    {sd.original_filename}
+                                  </p>
+                                  <p className="text-[11px] text-slate-500">
+                                    {sd.mime_type} · {formatBytes(sd.byte_size)}
+                                  </p>
+                                </div>
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void handleDownloadProtectedBlob(
+                                        `/api/v1/supporting-documents/${sd.id}/download`,
+                                        sd.original_filename,
+                                        sd.mime_type
+                                      )
+                                    }
+                                    className="text-emerald-900 hover:underline font-medium"
+                                  >
+                                    Download
+                                  </button>
+                                  {hasPermission("documents:write") && (
+                                    <label className="text-slate-700 hover:underline cursor-pointer font-medium">
+                                      Replace
+                                      <input
+                                        type="file"
+                                        accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp"
+                                        className="hidden"
+                                        onChange={(e) => {
+                                          const f = e.target.files?.[0];
+                                          if (f) void handleReplaceSupportingFile(sd.id, f);
+                                          e.target.value = "";
+                                        }}
+                                      />
+                                    </label>
+                                  )}
+                                  {hasPermission("documents:delete") && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleDeleteSupportingFile(sd.id)}
+                                      className="text-rose-700 hover:underline font-medium"
+                                    >
+                                      Delete
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
                         )}
                       </div>
                     </div>

@@ -505,6 +505,54 @@ async function generateAcroFormNode(payload: {
   };
 }
 
+function flattenRenderValues(
+  input: Record<string, unknown>,
+  prefix = ""
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [rawKey, val] of Object.entries(input)) {
+    const dotted = prefix ? `${prefix}.${rawKey}` : rawKey;
+    if (val !== null && typeof val === "object" && !Array.isArray(val)) {
+      Object.assign(out, flattenRenderValues(val as Record<string, unknown>, dotted));
+    } else {
+      out[dotted] = val;
+      const underscored = dotted.replace(/\./g, "_");
+      if (!(underscored in out)) {
+        out[underscored] = val;
+      }
+    }
+  }
+  return out;
+}
+
+function resolveFieldRenderValue(
+  fld: DetectedFormField,
+  flatValues: Record<string, unknown>
+): unknown {
+  const candidates: string[] = [fld.name, fld.id];
+  if (fld.originalLabelText) {
+    candidates.push(fld.originalLabelText);
+  }
+  const dotted = fld.name.replace(/_/g, ".");
+  if (!candidates.includes(dotted)) {
+    candidates.push(dotted);
+  }
+  for (const key of candidates) {
+    if (key && key in flatValues && flatValues[key] !== undefined) {
+      return flatValues[key];
+    }
+  }
+  return undefined;
+}
+
+function isTruthyCheckValue(rawVal: unknown): boolean {
+  if (rawVal === true) return true;
+  if (typeof rawVal === "string") {
+    return ["true", "1", "yes", "on"].includes(rawVal.trim().toLowerCase());
+  }
+  return rawVal === 1;
+}
+
 async function renderPdfNode(payload: {
   templatePdfPath: string;
   manifest: FieldManifest;
@@ -519,13 +567,13 @@ async function renderPdfNode(payload: {
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
   let populatedWidgets = 0;
-  const values = payload.values || {};
+  const flatValues = flattenRenderValues(payload.values || {});
 
   // Populate AcroForm widgets if present
   const formFieldsByName = new Map(form.getFields().map((f) => [f.getName(), f]));
 
   for (const fld of payload.manifest.fields) {
-    const rawVal = values[fld.name] ?? values[fld.id];
+    const rawVal = resolveFieldRenderValue(fld, flatValues);
     if (rawVal === undefined || rawVal === null || rawVal === "") continue;
 
     const acField = formFieldsByName.get(fld.name) || formFieldsByName.get(fld.id);
@@ -535,7 +583,7 @@ async function renderPdfNode(payload: {
         populatedWidgets++;
         continue;
       } else if (acField instanceof PDFCheckBox) {
-        if (rawVal === true || String(rawVal).toLowerCase() === "true") {
+        if (isTruthyCheckValue(rawVal)) {
           acField.check();
         } else {
           acField.uncheck();
@@ -557,38 +605,87 @@ async function renderPdfNode(payload: {
     const page = pages[fld.page];
     if (!page) continue;
     const crop = page.getCropBox();
-    const [x0, y0, x1, y1] = topLeftPdfToBottomLeftPdf(fld.rect, {
+    const cropRect = {
       x: crop.x,
       y: crop.y,
       width: crop.width,
       height: crop.height,
-    });
+    };
+    const [x0, y0, x1, y1] = topLeftPdfToBottomLeftPdf(fld.rect, cropRect);
 
     if (fld.type === "checkbox") {
-      if (rawVal === true || String(rawVal).toLowerCase() === "true") {
+      if (isTruthyCheckValue(rawVal)) {
+        const box = fld.optionRects?.true ?? fld.rect;
+        const [bx0, by0, bx1, by1] = topLeftPdfToBottomLeftPdf(box, cropRect);
+        const bw = bx1 - bx0;
+        const bh = by1 - by0;
+        const size = Math.max(8, Math.min(12, bh - 2));
         page.drawText("X", {
-          x: x0 + 2,
-          y: y0 + 2,
-          size: Math.max(8, Math.min(12, y1 - y0 - 2)),
+          x: bx0 + Math.max(1, (bw - font.widthOfTextAtSize("X", size)) / 2),
+          y: by0 + Math.max(1, (bh - size * 0.75) / 2),
+          size,
+          font,
+          color: rgb(0.06, 0.1, 0.2),
+        });
+        populatedWidgets++;
+      }
+    } else if (fld.type === "radio") {
+      const targetStr = String(rawVal).trim();
+      const matchedOpt =
+        fld.options.find((opt) => opt === targetStr) ??
+        fld.options.find((opt) => opt.toLowerCase() === targetStr.toLowerCase());
+      let targetBox = matchedOpt ? fld.optionRects?.[matchedOpt] : undefined;
+      if (!targetBox && matchedOpt && fld.options.length > 0) {
+        const idx = fld.options.indexOf(matchedOpt);
+        const sliceW = fld.rect.width / fld.options.length;
+        targetBox = {
+          x: fld.rect.x + idx * sliceW,
+          y: fld.rect.y,
+          width: sliceW,
+          height: fld.rect.height,
+        };
+      } else if (!targetBox && fld.optionRects) {
+        const directKey = Object.keys(fld.optionRects).find(
+          (k) => k.toLowerCase() === targetStr.toLowerCase()
+        );
+        if (directKey) targetBox = fld.optionRects[directKey];
+      }
+      if (targetBox) {
+        const [ox0, oy0, ox1, oy1] = topLeftPdfToBottomLeftPdf(targetBox, cropRect);
+        const ow = ox1 - ox0;
+        const oh = oy1 - oy0;
+        const size = Math.max(8, Math.min(12, oh - 2));
+        page.drawText("X", {
+          x: ox0 + Math.max(1, (ow - font.widthOfTextAtSize("X", size)) / 2),
+          y: oy0 + Math.max(1, (oh - size * 0.75) / 2),
+          size,
           font,
           color: rgb(0.06, 0.1, 0.2),
         });
         populatedWidgets++;
       }
     } else if (fld.cellRects && fld.cellRects.length > 0) {
-      const str = toWinAnsiSafeText(String(rawVal));
-      for (let i = 0; i < Math.min(str.length, fld.cellRects.length); i++) {
+      let str = toWinAnsiSafeText(String(rawVal)).trim();
+      if (!str) continue;
+      if (str.length > fld.cellRects.length) {
+        str = str.slice(0, fld.cellRects.length);
+      }
+      const padded =
+        fld.alignment === "right"
+          ? str.padStart(fld.cellRects.length, " ")
+          : str.padEnd(fld.cellRects.length, " ");
+      for (let i = 0; i < Math.min(padded.length, fld.cellRects.length); i++) {
+        const ch = padded[i];
+        if (!ch || ch === " ") continue;
         const cr = fld.cellRects[i];
-        const [cx0, cy0, , cy1] = topLeftPdfToBottomLeftPdf(cr, {
-          x: crop.x,
-          y: crop.y,
-          width: crop.width,
-          height: crop.height,
-        });
-        page.drawText(str[i], {
-          x: cx0 + 2,
-          y: cy0 + Math.max(2, (cy1 - cy0 - 9) / 2),
-          size: 9.5,
+        const [cx0, cy0, cx1, cy1] = topLeftPdfToBottomLeftPdf(cr, cropRect);
+        const cw = cx1 - cx0;
+        const fontSize = cw < 11.2 ? Math.min(9.5, Math.max(7.5, cw * 0.72)) : 9.5;
+        const chW = font.widthOfTextAtSize(ch, fontSize);
+        page.drawText(ch, {
+          x: cx0 + Math.max(1, (cw - chW) / 2),
+          y: cy0 + Math.max(2, (cy1 - cy0 - fontSize * 0.75) / 2),
+          size: fontSize,
           font,
           color: rgb(0.06, 0.1, 0.2),
         });

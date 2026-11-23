@@ -387,8 +387,10 @@ export async function generateAcroFormAssetForDocument(params: {
 }> {
   const db = getDatabase();
   const docRow = db
-    .prepare("SELECT source_storage_key, original_filename FROM documents WHERE id = ?")
-    .get(params.documentId) as
+    .prepare(
+      "SELECT source_storage_key, original_filename FROM documents WHERE id = ? AND tenant_id = ?"
+    )
+    .get(params.documentId, params.tenantId) as
     | { source_storage_key: string; original_filename: string }
     | undefined;
 
@@ -396,7 +398,10 @@ export async function generateAcroFormAssetForDocument(params: {
     throw new Error("Document not found");
   }
 
-  const sourcePath = resolveSafeStoragePath(docRow.source_storage_key);
+  const sourcePath =
+    docRow.source_storage_key === "src/lib/alv/ALV_blank.pdf"
+      ? path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf")
+      : resolveSafeStoragePath(docRow.source_storage_key);
   const outKey = `acroforms/${crypto.randomBytes(16).toString("hex")}.pdf`;
   const outAbsPath = resolveSafeStoragePath(outKey);
 
