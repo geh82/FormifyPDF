@@ -82,9 +82,20 @@ export async function createApp(apiConfig: AppConfig = {}) {
   return app;
 }
 
+function normalizeEntryPath(targetPath: string): string {
+  const resolved = path.resolve(targetPath);
+  let canonical = resolved;
+  try {
+    canonical = fs.realpathSync.native(resolved);
+  } catch {
+    // Fallback to path.resolve if path cannot be canonicalized
+  }
+  return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
 const isEntryPoint =
   Boolean(process.argv[1]) &&
-  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+  normalizeEntryPath(process.argv[1]) === normalizeEntryPath(fileURLToPath(import.meta.url));
 
 if (isEntryPoint) {
   const port = Number(process.env.PORT || "3000");
