@@ -482,7 +482,7 @@ function reconstructGridCells(
  * Group horizontally aligned uniform empty small cells into character-entry comb/grid groups.
  * Handles date/code groups interrupted by ':' or '/' thin gaps (keeping distinct boxes when wide gap or non-date text divider).
  */
-function clusterCharCells(
+export function clusterCharCells(
   smallBoxes: Array<{
     x0: number;
     y0: number;
@@ -633,7 +633,7 @@ function clusterCharCells(
  * Detect standalone horizontal lines subdivided by >=3 uniform vertical tick marks (comb notches).
  * Drops leading/trailing cells that already contain pre-printed static prefixes (e.g. "20").
  */
-function detectTickCombBaselines(
+export function detectTickCombBaselines(
   hLines: ExtractedLineSegment[],
   vLines: ExtractedLineSegment[],
   textRuns: ExtractedTextRun[]
@@ -1472,6 +1472,11 @@ function fuseAndClassifyPageGeometryCore(params: {
       }
       const th = tr.y1 - tr.y0;
       const tw = tr.x1 - tr.x0;
+      // A genuine glyph counter (e.g. the hole in 'o'/'e') is character-sized,
+      // comparable to the box. A much larger OCR text run (whole word/line) that
+      // merely overlaps the box is not a counter — don't mistake a real checkbox
+      // for a counter inside loose OCR bounding boxes.
+      if (tw > bw * 2.5 || th > bh * 2.5) return false;
       if (bh > th * 1.38 || bw > Math.max(th * 1.45, tw * 0.9)) {
         return false;
       }
