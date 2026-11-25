@@ -119,6 +119,46 @@ describe("Public Landing Conversion Experience (/)", () => {
     expect(footer?.querySelector('a[aria-label="FormifyPDF on GitHub"]')).toBeTruthy();
     expect(footer?.querySelector('a[aria-label="FormifyPDF on YouTube"]')).toBeTruthy();
 
+    // Contact link and Contact section with commercial channels & interactive form
+    const contactNavLink = container.querySelector('header nav a[href="#contact"]');
+    expect(contactNavLink?.textContent?.trim()).toBe("Contact");
+    const contactSection = container.querySelector("#contact");
+    expect(contactSection).toBeTruthy();
+    expect(contactSection?.textContent).toContain("Contact FormifyPDF");
+    expect(contactSection?.textContent).toContain("sales@formifypdf.com");
+    expect(contactSection?.textContent).toContain("support@formifypdf.com");
+
+    const nameInput = container.querySelector("#contact-name") as HTMLInputElement;
+    const emailInput = container.querySelector("#contact-email") as HTMLInputElement;
+    const msgInput = container.querySelector("#contact-message") as HTMLTextAreaElement;
+    const sendMsgBtn = findButtonByExactText(container, "Send Message");
+    expect(nameInput).toBeTruthy();
+    expect(emailInput).toBeTruthy();
+    expect(msgInput).toBeTruthy();
+    expect(sendMsgBtn).toBeTruthy();
+
+    await act(async () => {
+      const setVal = (el: HTMLInputElement | HTMLTextAreaElement, val: string) => {
+        const proto =
+          el instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+        setter?.call(el, val);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+      setVal(nameInput, "Jordan Lee");
+      setVal(emailInput, "jordan@company.com");
+      setVal(msgInput, "Need custom quote for 95-page form.");
+    });
+
+    await act(async () => {
+      sendMsgBtn?.closest("form")?.dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true })
+      );
+    });
+    expect(contactSection?.textContent).toContain("Message Ready for Jordan Lee");
+
     // Verify policy modal opens from footer link
     const privacyBtn = findButtonByExactText(container, "Privacy Policy");
     expect(privacyBtn).toBeTruthy();

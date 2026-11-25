@@ -10,11 +10,13 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Clock,
   CreditCard,
   Download,
   FileArchive,
   FileCheck2,
   FileText,
+  Globe,
   Lock,
   Mail,
   Menu,
@@ -507,6 +509,13 @@ export function PublicLandingConverter() {
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [quoteSubmitted, setQuoteSubmitted] = useState(false);
 
+  const [contactName, setContactName] = useState("");
+  const [contactEmail, setContactEmail] = useState("");
+  const [contactTopic, setContactTopic] = useState("General Support");
+  const [contactMessage, setContactMessage] = useState("");
+  const [contactError, setContactError] = useState<string | null>(null);
+  const [contactSubmitted, setContactSubmitted] = useState(false);
+
   const loadPublicConfig = useCallback(async () => {
     try {
       const res = await fetch("/api/v1/public/config");
@@ -561,6 +570,24 @@ export function PublicLandingConverter() {
     }
     setQuoteError(null);
     setQuoteSubmitted(true);
+  };
+
+  const handleContactSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!contactName.trim()) {
+      setContactError("Please enter your name.");
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail.trim())) {
+      setContactError("Please enter a valid email address.");
+      return;
+    }
+    if (!contactMessage.trim()) {
+      setContactError("Please include a short message or question.");
+      return;
+    }
+    setContactError(null);
+    setContactSubmitted(true);
   };
 
   const scrollToWorkspace = () => {
@@ -837,12 +864,6 @@ export function PublicLandingConverter() {
               Capabilities
             </a>
             <a
-              href="#how-it-works"
-              className="py-1 hover:text-slate-900 hover:underline underline-offset-8 decoration-emerald-800/80 decoration-2 transition-colors whitespace-nowrap shrink-0"
-            >
-              How It Works
-            </a>
-            <a
               href="#pricing"
               className="py-1 hover:text-slate-900 hover:underline underline-offset-8 decoration-emerald-800/80 decoration-2 transition-colors whitespace-nowrap shrink-0"
             >
@@ -853,6 +874,12 @@ export function PublicLandingConverter() {
               className="py-1 hover:text-slate-900 hover:underline underline-offset-8 decoration-emerald-800/80 decoration-2 transition-colors whitespace-nowrap shrink-0"
             >
               FAQ
+            </a>
+            <a
+              href="#contact"
+              className="py-1 hover:text-slate-900 hover:underline underline-offset-8 decoration-emerald-800/80 decoration-2 transition-colors whitespace-nowrap shrink-0"
+            >
+              Contact
             </a>
           </nav>
 
@@ -905,13 +932,6 @@ export function PublicLandingConverter() {
               Capabilities
             </a>
             <a
-              href="#how-it-works"
-              onClick={() => setMobileMenuOpen(false)}
-              className="rounded-md px-3 py-2.5 hover:bg-slate-50 hover:text-slate-900"
-            >
-              How It Works
-            </a>
-            <a
               href="#pricing"
               onClick={() => setMobileMenuOpen(false)}
               className="rounded-md px-3 py-2.5 hover:bg-slate-50 hover:text-slate-900"
@@ -924,6 +944,13 @@ export function PublicLandingConverter() {
               className="rounded-md px-3 py-2.5 hover:bg-slate-50 hover:text-slate-900"
             >
               FAQ
+            </a>
+            <a
+              href="#contact"
+              onClick={() => setMobileMenuOpen(false)}
+              className="rounded-md px-3 py-2.5 hover:bg-slate-50 hover:text-slate-900"
+            >
+              Contact
             </a>
           </nav>
         )}
@@ -1810,9 +1837,233 @@ export function PublicLandingConverter() {
             </div>
           </div>
         </section>
+        {/* Contact Section */}
+        <section id="contact" className="border-t border-slate-200 bg-[#F7F8F7]">
+          <div className="mx-auto max-w-6xl px-4 sm:px-6 py-16 grid grid-cols-1 lg:grid-cols-12 gap-10 items-start">
+            <div className="lg:col-span-5 space-y-6">
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-emerald-900">Contact FormifyPDF</p>
+                <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 [text-wrap:balance]">
+                  Talk With Our Document Conversion Team
+                </h2>
+                <p className="text-sm text-slate-600 leading-relaxed">
+                  Reach out for support with a converted PDF, custom quotes above 60 pages, or
+                  ongoing business and bulk volume agreements.
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white divide-y divide-slate-100 shadow-xs">
+                <div className="p-4 flex items-start gap-3">
+                  <Mail className="h-4 w-4 text-emerald-900 shrink-0 mt-0.5" aria-hidden="true" />
+                  <div className="text-xs space-y-0.5">
+                    <p className="font-semibold text-slate-900">Customer &amp; Technical Support</p>
+                    <a
+                      href="mailto:support@formifypdf.com"
+                      className="text-emerald-900 font-medium hover:underline underline-offset-4"
+                    >
+                      support@formifypdf.com
+                    </a>
+                  </div>
+                </div>
+
+                <div className="p-4 flex items-start gap-3">
+                  <Building2 className="h-4 w-4 text-emerald-900 shrink-0 mt-0.5" aria-hidden="true" />
+                  <div className="text-xs space-y-0.5">
+                    <p className="font-semibold text-slate-900">
+                      60+ Page Quotes, Bulk &amp; Enterprise Sales
+                    </p>
+                    <a
+                      href="mailto:sales@formifypdf.com"
+                      className="text-emerald-900 font-medium hover:underline underline-offset-4"
+                    >
+                      sales@formifypdf.com
+                    </a>
+                  </div>
+                </div>
+
+                <div className="p-4 flex items-start gap-3">
+                  <Globe className="h-4 w-4 text-emerald-900 shrink-0 mt-0.5" aria-hidden="true" />
+                  <div className="text-xs space-y-0.5">
+                    <p className="font-semibold text-slate-900">Official Commercial Portal</p>
+                    <a
+                      href="https://formifypdf.com"
+                      className="text-slate-700 hover:text-emerald-900 hover:underline underline-offset-4"
+                    >
+                      https://formifypdf.com
+                    </a>
+                  </div>
+                </div>
+
+                <div className="p-4 flex items-start gap-3">
+                  <Clock className="h-4 w-4 text-emerald-900 shrink-0 mt-0.5" aria-hidden="true" />
+                  <div className="text-xs space-y-0.5">
+                    <p className="font-semibold text-slate-900">Response Hours</p>
+                    <p className="text-slate-600">Monday – Friday · Same-business-day replies</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="lg:col-span-7">
+              <div className="rounded-2xl border border-slate-200 border-t-2 border-t-emerald-900 bg-white p-6 sm:p-8 shadow-sm">
+                {contactSubmitted ? (
+                  <div className="space-y-4">
+                    <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                      <CheckCircle2
+                        className="h-5 w-5 text-emerald-800 shrink-0 mt-0.5"
+                        aria-hidden="true"
+                      />
+                      <div className="space-y-1 text-sm text-emerald-950">
+                        <p className="font-bold">Message Ready for {contactName.trim()}</p>
+                        <p className="text-xs text-emerald-900 leading-relaxed">
+                          Your {contactTopic.toLowerCase()} inquiry has been prepared for{" "}
+                          {contactEmail.trim()}. Click below to send directly via email, or compose
+                          another message.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <a
+                        href={`mailto:${
+                          contactTopic === "General Support" ||
+                          contactTopic === "ZIP Bundle & Format Help"
+                            ? "support@formifypdf.com"
+                            : "sales@formifypdf.com"
+                        }?subject=${encodeURIComponent(
+                          `FormifyPDF Inquiry: ${contactTopic}`
+                        )}&body=${encodeURIComponent(
+                          `Name: ${contactName.trim()} | Email: ${contactEmail.trim()} | Topic: ${contactTopic} | Message: ${contactMessage.trim()}`
+                        )}`}
+                        className="inline-flex items-center gap-2 rounded-lg bg-emerald-900 px-4 py-2.5 text-xs font-semibold text-white hover:bg-emerald-800 transition-colors"
+                      >
+                        <Mail className="h-4 w-4" aria-hidden="true" />
+                        <span>Send via Email Client</span>
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setContactSubmitted(false);
+                          setContactMessage("");
+                        }}
+                        className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                      >
+                        New Message
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <form onSubmit={handleContactSubmit} className="space-y-4">
+                    <div>
+                      <h3 className="text-lg font-bold text-slate-900">Send Us a Message</h3>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Include your page count or conversion questions and we will reply promptly.
+                      </p>
+                    </div>
+
+                    {contactError && (
+                      <p role="alert" className="text-xs font-medium text-rose-700">
+                        {contactError}
+                      </p>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label
+                          htmlFor="contact-name"
+                          className="block text-xs font-semibold text-slate-700"
+                        >
+                          Full Name
+                        </label>
+                        <input
+                          id="contact-name"
+                          type="text"
+                          value={contactName}
+                          onChange={(e) => setContactName(e.target.value)}
+                          placeholder="Your name"
+                          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-emerald-900"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label
+                          htmlFor="contact-email"
+                          className="block text-xs font-semibold text-slate-700"
+                        >
+                          Email Address
+                        </label>
+                        <input
+                          id="contact-email"
+                          type="email"
+                          value={contactEmail}
+                          onChange={(e) => setContactEmail(e.target.value)}
+                          placeholder="you@company.com"
+                          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-emerald-900"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label
+                        htmlFor="contact-topic"
+                        className="block text-xs font-semibold text-slate-700"
+                      >
+                        Inquiry Topic
+                      </label>
+                      <select
+                        id="contact-topic"
+                        value={contactTopic}
+                        onChange={(e) => setContactTopic(e.target.value)}
+                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-emerald-900"
+                      >
+                        <option value="General Support">General Support</option>
+                        <option value="Above 60 Pages Custom Quote">
+                          Above 60 Pages Custom Quote
+                        </option>
+                        <option value="Bulk, Business & Recurring Plan">
+                          Bulk, Business &amp; Recurring Plan
+                        </option>
+                        <option value="ZIP Bundle & Format Help">ZIP Bundle &amp; Format Help</option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label
+                        htmlFor="contact-message"
+                        className="block text-xs font-semibold text-slate-700"
+                      >
+                        Message
+                      </label>
+                      <textarea
+                        id="contact-message"
+                        rows={4}
+                        value={contactMessage}
+                        onChange={(e) => setContactMessage(e.target.value)}
+                        placeholder="Share details about your PDF forms, page counts, or recurring business needs..."
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-emerald-900"
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                      <span className="text-xs text-slate-500">
+                        Direct email: support@formifypdf.com
+                      </span>
+                      <button
+                        type="submit"
+                        className="inline-flex items-center gap-2 rounded-lg bg-emerald-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-emerald-800 transition-colors shadow-xs"
+                      >
+                        <Mail className="h-4 w-4" aria-hidden="true" />
+                        <span>Send Message</span>
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
       </main>
 
-      {/* Commercial Footer for formifypdf.com with Socials, Product Links & Legal Documentation */}
+      {/* Commercial Footer for formifypdf.com with Socials, Contacts, Product & Legal Links */}
       <footer className="bg-[#0B1613] text-slate-300 border-t border-emerald-950">
         <div className="mx-auto max-w-6xl px-4 sm:px-6 pt-14 pb-10">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-10 pb-12 border-b border-white/10">
@@ -1982,10 +2233,26 @@ export function PublicLandingConverter() {
               </ul>
             </div>
 
-            {/* Legal */}
+            {/* Contacts & Legal */}
             <div className="lg:col-span-2 space-y-3">
-              <h3 className="text-sm font-semibold text-white">Legal</h3>
+              <h3 className="text-sm font-semibold text-white">Contacts &amp; Legal</h3>
               <ul className="space-y-2.5 text-sm text-slate-300">
+                <li>
+                  <a
+                    href="#contact"
+                    className="hover:text-white hover:underline underline-offset-4 transition-colors"
+                  >
+                    Contact Us
+                  </a>
+                </li>
+                <li>
+                  <a
+                    href="mailto:sales@formifypdf.com"
+                    className="hover:text-white hover:underline underline-offset-4 transition-colors"
+                  >
+                    sales@formifypdf.com
+                  </a>
+                </li>
                 <li>
                   <button
                     type="button"
