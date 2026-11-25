@@ -3434,7 +3434,16 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     const db = getDatabase();
     const toggles = getTenantFeatureToggles(db, PUBLIC_TENANT_ID);
     const pricingTiers = getActivePricingTiers(db, PUBLIC_TENANT_ID);
-    res.json({ ok: true, toggles, pricingTiers });
+    const tenant = db
+      .prepare("SELECT name, retention_days FROM tenants WHERE id = ?")
+      .get(PUBLIC_TENANT_ID) as { name: string; retention_days: number } | undefined;
+    res.json({
+      ok: true,
+      workspaceName: tenant?.name ?? "FormifyPDF",
+      retentionDays: tenant?.retention_days ?? 30,
+      toggles,
+      pricingTiers,
+    });
   });
 
   router.post("/public/documents", limiter, (req, res) => {
@@ -4162,17 +4171,34 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         normalDownload,
       } = req.body;
 
+      const updatedToggles = {
+        topTierZipUpload: Boolean(topTierZipUpload),
+        topTierZipDownload: Boolean(topTierZipDownload),
+        normalUpload: Boolean(normalUpload),
+        normalDownload: Boolean(normalDownload),
+      };
+
       db.prepare(
         "UPDATE tenants SET top_tier_zip_upload = ?, top_tier_zip_download = ?, normal_upload = ?, normal_download = ? WHERE id = ?"
       ).run(
-        topTierZipUpload ? 1 : 0,
-        topTierZipDownload ? 1 : 0,
-        normalUpload ? 1 : 0,
-        normalDownload ? 1 : 0,
+        updatedToggles.topTierZipUpload ? 1 : 0,
+        updatedToggles.topTierZipDownload ? 1 : 0,
+        updatedToggles.normalUpload ? 1 : 0,
+        updatedToggles.normalDownload ? 1 : 0,
         tid
       );
 
-      res.json({ ok: true });
+      logAuditEvent({
+        tenantId: tid,
+        actorUserId: req.principal!.userId,
+        actorEmail: req.principal!.email,
+        action: "admin.toggles_updated",
+        resourceType: "tenant",
+        resourceId: tid,
+        metadata: updatedToggles,
+      });
+
+      res.json({ ok: true, toggles: updatedToggles });
     }
   );
 
@@ -4203,7 +4229,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       const id = `tier_${parsedMaxPages}_${parsedPriceCents}`;
 
       db.prepare(
-        "INSERT OR REPLACE INTO pricing_tiers (id, tenant_id, name, max_pages, price_cents, description, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)"
+        "INSERT OR REPLACE INTO pricing_tiers (id, tenant_id, name, max_pages, price_cents, description, is_active, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'))"
       ).run(
         id,
         tid,
@@ -4212,6 +4238,16 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         parsedPriceCents,
         typeof description === "string" ? description.trim() : ""
       );
+
+      logAuditEvent({
+        tenantId: tid,
+        actorUserId: req.principal!.userId,
+        actorEmail: req.principal!.email,
+        action: "admin.pricing_tier_created",
+        resourceType: "pricing_tier",
+        resourceId: id,
+        metadata: { name: name.trim(), maxPages: parsedMaxPages, priceCents: parsedPriceCents },
+      });
 
       res.json({ ok: true, id });
     }
@@ -4277,6 +4313,16 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         db.prepare(sql).run(...values);
       }
 
+      logAuditEvent({
+        tenantId: tid,
+        actorUserId: req.principal!.userId,
+        actorEmail: req.principal!.email,
+        action: "admin.pricing_tier_updated",
+        resourceType: "pricing_tier",
+        resourceId: tierId,
+        metadata: { name, maxPages, priceCents, isActive },
+      });
+
       res.json({ ok: true });
     }
   );
@@ -4296,6 +4342,15 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       if (result.changes === 0) {
         return res.status(404).json({ ok: false, error: "Pricing tier not found." });
       }
+
+      logAuditEvent({
+        tenantId: tid,
+        actorUserId: req.principal!.userId,
+        actorEmail: req.principal!.email,
+        action: "admin.pricing_tier_deleted",
+        resourceType: "pricing_tier",
+        resourceId: tierId,
+      });
 
       res.json({ ok: true });
     }

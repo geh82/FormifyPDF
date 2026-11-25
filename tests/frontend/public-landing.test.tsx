@@ -430,4 +430,57 @@ describe("Public Landing Conversion Experience (/)", () => {
       URL.revokeObjectURL = origRevokeObjectUrl;
     }
   });
+
+  it("refreshes live on / when admin disables ZIP Upload or updates pricing tiers", async () => {
+    let zipUploadEnabled = true;
+    let tier15PriceCents = 299;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/v1/public/config") {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            toggles: {
+              normalUpload: true,
+              normalDownload: true,
+              topTierZipUpload: zipUploadEnabled,
+              topTierZipDownload: true,
+            },
+            pricingTiers: [
+              {
+                id: "tier_15_299",
+                name: "Up to 15 pages",
+                max_pages: 15,
+                price_cents: tier15PriceCents,
+                description: "Starter tier",
+                is_active: 1,
+              },
+            ],
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ ok: true }) };
+    }) as unknown as typeof fetch;
+
+    await act(async () => {
+      root.render(<App />);
+    });
+
+    expect(container.textContent).toContain("$2.99");
+    expect(findButtonByExactText(container, "ZIP Upload")?.disabled).toBe(false);
+
+    // Simulate admin changing toggle & price, then user returning to / tab
+    zipUploadEnabled = false;
+    tier15PriceCents = 349;
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    expect(container.textContent).toContain("$3.49");
+    expect(findButtonByExactText(container, "ZIP Upload")?.disabled).toBe(true);
+    expect(container.textContent).toContain("ZIP Upload is currently disabled by administrator settings.");
+  });
 });

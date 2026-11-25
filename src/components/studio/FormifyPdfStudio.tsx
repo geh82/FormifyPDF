@@ -67,6 +67,24 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function broadcastAdminConfigChange() {
+  if (typeof window === "undefined") return;
+  try {
+    if ("BroadcastChannel" in window) {
+      const ch = new BroadcastChannel("formifypdf-config-sync");
+      ch.postMessage({ type: "config-updated", ts: Date.now() });
+      ch.close();
+    }
+  } catch {
+    // ignore BroadcastChannel restrictions
+  }
+  try {
+    window.localStorage?.setItem("formifypdf:config-updated-at", String(Date.now()));
+  } catch {
+    // ignore storage restrictions
+  }
+}
+
 export function FormifyPdfStudio() {
   const apiRef = useRef<StudioApiClient>(new StudioApiClient());
   const api = apiRef.current;
@@ -207,6 +225,11 @@ export function FormifyPdfStudio() {
   const [newTierMaxPages, setNewTierMaxPages] = useState("50");
   const [newTierPriceDollars, setNewTierPriceDollars] = useState("7.99");
   const [newTierDescription, setNewTierDescription] = useState("");
+  const [editingTierId, setEditingTierId] = useState<string | null>(null);
+  const [editTierName, setEditTierName] = useState("");
+  const [editTierMaxPages, setEditTierMaxPages] = useState("");
+  const [editTierPriceDollars, setEditTierPriceDollars] = useState("");
+  const [editTierDescription, setEditTierDescription] = useState("");
   const [adminBusy, setAdminBusy] = useState(false);
 
   const [notice, setNotice] = useState<string | null>(null);
@@ -2628,7 +2651,8 @@ export function FormifyPdfStudio() {
                               method: "POST",
                               body: JSON.stringify(adminToggles),
                             });
-                            setNotice("Feature toggles updated.");
+                            broadcastAdminConfigChange();
+                            setNotice("Feature toggles updated and applied live.");
                           } catch (err) {
                             setStudioError(
                               err instanceof Error ? err.message : "Failed to save feature toggles"
@@ -2674,7 +2698,8 @@ export function FormifyPdfStudio() {
                           setAdminPricingTiers(refreshed.pricingTiers || []);
                           setNewTierName("");
                           setNewTierDescription("");
-                          setNotice("Pricing tier saved.");
+                          broadcastAdminConfigChange();
+                          setNotice("Pricing tier saved and applied live.");
                         } catch (err) {
                           setStudioError(
                             err instanceof Error ? err.message : "Failed to create pricing tier"
@@ -2745,62 +2770,205 @@ export function FormifyPdfStudio() {
                             <th className="px-3 py-2 font-medium">Name</th>
                             <th className="px-3 py-2 font-medium">Max Pages</th>
                             <th className="px-3 py-2 font-medium">Price</th>
+                            <th className="px-3 py-2 font-medium">Description</th>
                             <th className="px-3 py-2 font-medium">Status</th>
                             <th className="px-3 py-2 font-medium">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100 tabular-nums">
-                          {adminPricingTiers.map((tier) => (
-                            <tr key={tier.id}>
-                              <td className="px-3 py-2 font-medium text-slate-900">{tier.name}</td>
-                              <td className="px-3 py-2">{tier.max_pages} pages</td>
-                              <td className="px-3 py-2 font-mono">
-                                ${(tier.price_cents / 100).toFixed(2)}
-                              </td>
-                              <td className="px-3 py-2">
-                                {Number(tier.is_active) === 1 ? "Active" : "Inactive"}
-                              </td>
-                              <td className="px-3 py-2">
-                                <div className="flex items-center gap-3">
-                                  <button
-                                    type="button"
-                                    onClick={async () => {
-                                      await api.json(`/api/v1/admin/pricing-tiers/${tier.id}`, {
-                                        method: "PATCH",
-                                        body: JSON.stringify({
-                                          isActive: Number(tier.is_active) !== 1,
-                                        }),
-                                      });
-                                      const refreshed = await api.json<{
-                                        ok: boolean;
-                                        pricingTiers: PricingTierRecord[];
-                                      }>("/api/v1/admin");
-                                      setAdminPricingTiers(refreshed.pricingTiers || []);
-                                    }}
-                                    className="text-emerald-900 hover:underline"
-                                  >
-                                    {Number(tier.is_active) === 1 ? "Deactivate" : "Activate"}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={async () => {
-                                      await api.json(`/api/v1/admin/pricing-tiers/${tier.id}`, {
-                                        method: "DELETE",
-                                      });
-                                      const refreshed = await api.json<{
-                                        ok: boolean;
-                                        pricingTiers: PricingTierRecord[];
-                                      }>("/api/v1/admin");
-                                      setAdminPricingTiers(refreshed.pricingTiers || []);
-                                    }}
-                                    className="text-rose-700 hover:underline"
-                                  >
-                                    Delete
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
+                          {adminPricingTiers.map((tier) => {
+                            const isEditing = editingTierId === tier.id;
+                            return (
+                              <tr key={tier.id}>
+                                <td className="px-3 py-2 font-medium text-slate-900">
+                                  {isEditing ? (
+                                    <input
+                                      type="text"
+                                      aria-label="Edit tier name"
+                                      value={editTierName}
+                                      onChange={(e) => setEditTierName(e.target.value)}
+                                      className="w-full min-w-[120px] rounded border border-slate-300 px-2 py-1 text-xs"
+                                    />
+                                  ) : (
+                                    tier.name
+                                  )}
+                                </td>
+                                <td className="px-3 py-2">
+                                  {isEditing ? (
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      aria-label="Edit tier max pages"
+                                      value={editTierMaxPages}
+                                      onChange={(e) => setEditTierMaxPages(e.target.value)}
+                                      className="w-20 rounded border border-slate-300 px-2 py-1 text-xs tabular-nums"
+                                    />
+                                  ) : (
+                                    `${tier.max_pages} pages`
+                                  )}
+                                </td>
+                                <td className="px-3 py-2 font-mono">
+                                  {isEditing ? (
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      step="0.01"
+                                      aria-label="Edit tier price"
+                                      value={editTierPriceDollars}
+                                      onChange={(e) => setEditTierPriceDollars(e.target.value)}
+                                      className="w-24 rounded border border-slate-300 px-2 py-1 text-xs font-mono tabular-nums"
+                                    />
+                                  ) : (
+                                    `$${(tier.price_cents / 100).toFixed(2)}`
+                                  )}
+                                </td>
+                                <td className="px-3 py-2 text-slate-600">
+                                  {isEditing ? (
+                                    <input
+                                      type="text"
+                                      aria-label="Edit tier description"
+                                      value={editTierDescription}
+                                      onChange={(e) => setEditTierDescription(e.target.value)}
+                                      className="w-full min-w-[140px] rounded border border-slate-300 px-2 py-1 text-xs"
+                                    />
+                                  ) : (
+                                    tier.description || "-"
+                                  )}
+                                </td>
+                                <td className="px-3 py-2">
+                                  {Number(tier.is_active) === 1 ? "Active" : "Inactive"}
+                                </td>
+                                <td className="px-3 py-2">
+                                  {isEditing ? (
+                                    <div className="flex items-center gap-3">
+                                      <button
+                                        type="button"
+                                        disabled={adminBusy}
+                                        onClick={async () => {
+                                          setStudioError(null);
+                                          setAdminBusy(true);
+                                          try {
+                                            await api.json(`/api/v1/admin/pricing-tiers/${tier.id}`, {
+                                              method: "PATCH",
+                                              body: JSON.stringify({
+                                                name: editTierName.trim(),
+                                                maxPages: Math.round(Number(editTierMaxPages)),
+                                                priceCents: Math.round(
+                                                  Number(editTierPriceDollars) * 100
+                                                ),
+                                                description: editTierDescription.trim(),
+                                              }),
+                                            });
+                                            const refreshed = await api.json<{
+                                              ok: boolean;
+                                              pricingTiers: PricingTierRecord[];
+                                            }>("/api/v1/admin");
+                                            setAdminPricingTiers(refreshed.pricingTiers || []);
+                                            setEditingTierId(null);
+                                            broadcastAdminConfigChange();
+                                            setNotice("Pricing tier updated and applied live.");
+                                          } catch (err) {
+                                            setStudioError(
+                                              err instanceof Error
+                                                ? err.message
+                                                : "Failed to update pricing tier"
+                                            );
+                                          } finally {
+                                            setAdminBusy(false);
+                                          }
+                                        }}
+                                        className="font-semibold text-emerald-900 hover:underline"
+                                      >
+                                        Save
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingTierId(null)}
+                                        className="text-slate-600 hover:underline"
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <div className="flex items-center gap-3">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingTierId(tier.id);
+                                          setEditTierName(tier.name);
+                                          setEditTierMaxPages(String(tier.max_pages));
+                                          setEditTierPriceDollars(
+                                            (tier.price_cents / 100).toFixed(2)
+                                          );
+                                          setEditTierDescription(tier.description || "");
+                                        }}
+                                        className="text-slate-800 hover:underline font-medium"
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={async () => {
+                                          setStudioError(null);
+                                          try {
+                                            await api.json(`/api/v1/admin/pricing-tiers/${tier.id}`, {
+                                              method: "PATCH",
+                                              body: JSON.stringify({
+                                                isActive: Number(tier.is_active) !== 1,
+                                              }),
+                                            });
+                                            const refreshed = await api.json<{
+                                              ok: boolean;
+                                              pricingTiers: PricingTierRecord[];
+                                            }>("/api/v1/admin");
+                                            setAdminPricingTiers(refreshed.pricingTiers || []);
+                                            broadcastAdminConfigChange();
+                                            setNotice("Pricing tier status updated live.");
+                                          } catch (err) {
+                                            setStudioError(
+                                              err instanceof Error
+                                                ? err.message
+                                                : "Failed to update pricing tier"
+                                            );
+                                          }
+                                        }}
+                                        className="text-emerald-900 hover:underline"
+                                      >
+                                        {Number(tier.is_active) === 1 ? "Deactivate" : "Activate"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={async () => {
+                                          setStudioError(null);
+                                          try {
+                                            await api.json(`/api/v1/admin/pricing-tiers/${tier.id}`, {
+                                              method: "DELETE",
+                                            });
+                                            const refreshed = await api.json<{
+                                              ok: boolean;
+                                              pricingTiers: PricingTierRecord[];
+                                            }>("/api/v1/admin");
+                                            setAdminPricingTiers(refreshed.pricingTiers || []);
+                                            broadcastAdminConfigChange();
+                                            setNotice("Pricing tier deleted.");
+                                          } catch (err) {
+                                            setStudioError(
+                                              err instanceof Error
+                                                ? err.message
+                                                : "Failed to delete pricing tier"
+                                            );
+                                          }
+                                        }}
+                                        className="text-rose-700 hover:underline"
+                                      >
+                                        Delete
+                                      </button>
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -2884,7 +3052,8 @@ export function FormifyPdfStudio() {
                               retentionDays: settingsData.retentionDays,
                             }),
                           });
-                          setNotice("Settings saved.");
+                          broadcastAdminConfigChange();
+                          setNotice("Settings saved and applied live.");
                         }}
                         className="rounded bg-emerald-900 px-4 py-1.5 font-medium text-white hover:bg-emerald-800"
                       >

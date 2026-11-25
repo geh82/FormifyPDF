@@ -478,6 +478,7 @@ export function PublicLandingConverter() {
     topTierZipUpload: false,
     topTierZipDownload: false,
   });
+  const [configLoaded, setConfigLoaded] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -518,7 +519,7 @@ export function PublicLandingConverter() {
 
   const loadPublicConfig = useCallback(async () => {
     try {
-      const res = await fetch("/api/v1/public/config");
+      const res = await fetch("/api/v1/public/config", { cache: "no-store" });
       const data = (await res.json().catch(() => null)) as {
         ok?: boolean;
         toggles?: PublicToggles;
@@ -527,6 +528,8 @@ export function PublicLandingConverter() {
       if (res.ok && data?.ok) {
         if (data.toggles) setToggles(data.toggles);
         if (Array.isArray(data.pricingTiers)) setPricingTiers(data.pricingTiers);
+        setConfigLoaded(true);
+        setConfigError(null);
       }
     } catch {
       setConfigError("Unable to load current pricing tiers.");
@@ -535,6 +538,43 @@ export function PublicLandingConverter() {
 
   useEffect(() => {
     void loadPublicConfig();
+
+    const onFocus = () => {
+      void loadPublicConfig();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void loadPublicConfig();
+      }
+    };
+    const onStorage = (evt: StorageEvent) => {
+      if (evt.key === "formifypdf:config-updated-at") {
+        void loadPublicConfig();
+      }
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("storage", onStorage);
+
+    let channel: BroadcastChannel | null = null;
+    try {
+      if ("BroadcastChannel" in window) {
+        channel = new BroadcastChannel("formifypdf-config-sync");
+        channel.onmessage = () => {
+          void loadPublicConfig();
+        };
+      }
+    } catch {
+      channel = null;
+    }
+
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("storage", onStorage);
+      channel?.close();
+    };
   }, [loadPublicConfig]);
 
   useEffect(() => {
@@ -740,6 +780,11 @@ export function PublicLandingConverter() {
     }
   };
 
+  const maxStandardPages =
+    pricingTiers.length > 0
+      ? Math.max(...pricingTiers.map((t) => Number(t.max_pages) || 0))
+      : 60;
+
   const matchedTier = conversion
     ? matchPricingTierForPages(conversion.pageCount, pricingTiers)
     : null;
@@ -766,6 +811,9 @@ export function PublicLandingConverter() {
       } | null;
 
       if (!res.ok || !data?.ok || !data.paid) {
+        if (res.status === 400) {
+          void loadPublicConfig();
+        }
         throw new Error(data?.error || "Payment confirmation failed.");
       }
 
@@ -781,7 +829,9 @@ export function PublicLandingConverter() {
           : prev
       );
       setStatusNotice(
-        `Payment confirmed for ${matchedTier.name} (${formatCurrency(matchedTier.price_cents)}). Downloads are now unlocked.`
+        `Payment confirmed for ${data.tier?.name ?? matchedTier.name} (${formatCurrency(
+          data.tier?.price_cents ?? matchedTier.price_cents
+        )}). Downloads are now unlocked.`
       );
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Payment confirmation failed.");
@@ -1123,8 +1173,9 @@ export function PublicLandingConverter() {
                   <div className="flex flex-wrap items-center gap-3">
                     <button
                       type="button"
+                      disabled={configLoaded && !toggles.normalUpload}
                       onClick={() => pdfInputRef.current?.click()}
-                      className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                      className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-45 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
                     >
                       <Upload className="h-4 w-4" aria-hidden="true" />
                       <span>Upload</span>
@@ -1132,13 +1183,24 @@ export function PublicLandingConverter() {
 
                     <button
                       type="button"
+                      disabled={configLoaded && !toggles.topTierZipUpload}
                       onClick={() => zipInputRef.current?.click()}
-                      className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-900 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+                      className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-900 hover:bg-slate-50 disabled:opacity-45 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
                     >
                       <FileArchive className="h-4 w-4 text-emerald-900" aria-hidden="true" />
                       <span>ZIP Upload</span>
                     </button>
                   </div>
+
+                  {configLoaded && (!toggles.normalUpload || !toggles.topTierZipUpload) && (
+                    <p className="text-xs text-amber-800 font-medium">
+                      {!toggles.normalUpload && !toggles.topTierZipUpload
+                        ? "PDF and ZIP uploads are currently disabled by administrator settings."
+                        : !toggles.normalUpload
+                        ? "PDF Upload is currently disabled by administrator settings."
+                        : "ZIP Upload is currently disabled by administrator settings."}
+                    </p>
+                  )}
 
                   <p className="text-xs text-slate-600">
                     Drag and drop a <span className="font-semibold text-slate-800">.pdf</span> form or{" "}
@@ -1269,7 +1331,7 @@ export function PublicLandingConverter() {
                           </span>
                         ) : (
                           <span className="font-semibold text-amber-800">
-                            Above 60 pages — Custom price
+                            Above {maxStandardPages} pages — Custom price
                           </span>
                         )}
                       </dd>
@@ -1333,15 +1395,15 @@ export function PublicLandingConverter() {
                         </div>
                         <div className="space-y-1">
                           <h4 className="text-sm font-bold text-slate-900">
-                            Above 60 Pages — Custom Price Required
+                            Above {maxStandardPages} Pages — Custom Price Required
                           </h4>
                           <p className="text-xs text-slate-600 leading-relaxed">
                             This document has{" "}
                             <span className="font-semibold text-slate-900">
                               {conversion.pageCount} pages
                             </span>
-                            , which exceeds the 60-page standard tier. Reach out for custom pricing
-                            for this file or recurring business volume.
+                            , which exceeds the {maxStandardPages}-page standard tier. Reach out for
+                            custom pricing for this file or recurring business volume.
                           </p>
                         </div>
                       </div>
@@ -1401,11 +1463,15 @@ export function PublicLandingConverter() {
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <button
                       type="button"
-                      disabled={!conversion.paid || downloadingType !== null}
-                      aria-disabled={!conversion.paid}
+                      disabled={
+                        !conversion.paid ||
+                        (configLoaded && !toggles.normalDownload) ||
+                        downloadingType !== null
+                      }
+                      aria-disabled={!conversion.paid || (configLoaded && !toggles.normalDownload)}
                       onClick={() => void handleDownloadFile("pdf")}
                       className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors whitespace-nowrap ${
-                        conversion.paid
+                        conversion.paid && (!configLoaded || toggles.normalDownload)
                           ? "bg-emerald-900 text-white hover:bg-emerald-800"
                           : "border border-slate-300 bg-slate-100 text-slate-500 cursor-not-allowed"
                       }`}
@@ -1420,11 +1486,17 @@ export function PublicLandingConverter() {
 
                     <button
                       type="button"
-                      disabled={!conversion.paid || downloadingType !== null}
-                      aria-disabled={!conversion.paid}
+                      disabled={
+                        !conversion.paid ||
+                        (configLoaded && !toggles.topTierZipDownload) ||
+                        downloadingType !== null
+                      }
+                      aria-disabled={
+                        !conversion.paid || (configLoaded && !toggles.topTierZipDownload)
+                      }
                       onClick={() => void handleDownloadFile("zip")}
                       className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors whitespace-nowrap ${
-                        conversion.paid
+                        conversion.paid && (!configLoaded || toggles.topTierZipDownload)
                           ? "border border-slate-900 bg-slate-900 text-white hover:bg-slate-800"
                           : "border border-slate-300 bg-slate-100 text-slate-500 cursor-not-allowed"
                       }`}
@@ -1444,11 +1516,17 @@ export function PublicLandingConverter() {
                       the matched page tier.
                     </p>
                   )}
-                  {conversion.paid && (!toggles.normalDownload || !toggles.topTierZipDownload) && (
-                    <p className="text-[11px] text-slate-500">
-                      Availability of individual export formats follows workspace download settings.
-                    </p>
-                  )}
+                  {conversion.paid &&
+                    configLoaded &&
+                    (!toggles.normalDownload || !toggles.topTierZipDownload) && (
+                      <p className="text-[11px] text-amber-800 font-medium">
+                        {!toggles.normalDownload && !toggles.topTierZipDownload
+                          ? "PDF Download and ZIP Download are disabled by administrator settings."
+                          : !toggles.normalDownload
+                          ? "PDF Download is currently disabled by administrator settings."
+                          : "ZIP Download is currently disabled by administrator settings."}
+                      </p>
+                    )}
                 </div>
               </div>
             </div>
@@ -1621,17 +1699,17 @@ export function PublicLandingConverter() {
                 </h2>
                 <p className="mt-1.5 text-sm text-slate-600">
                   Preview your converted fillable PDF on screen first — pay only for your page count
-                  tier, or reach out for 60+ page documents and ongoing bulk volume.
+                  tier, or reach out for {maxStandardPages}+ page documents and ongoing bulk volume.
                 </p>
               </div>
               <p className="text-xs font-medium text-slate-500">
-                Single conversions up to 60 pages · Custom &amp; recurring business options
+                Single conversions up to {maxStandardPages} pages · Custom &amp; recurring business options
               </p>
             </div>
 
             {configError && <p className="text-xs text-slate-500">{configError}</p>}
 
-            {/* Standard Per-Document Tiers (up to 15, 30, 45, 60 pages) */}
+            {/* Standard Per-Document Tiers */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
               {pricingTiers.map((tier) => (
                 <div
@@ -1651,6 +1729,11 @@ export function PublicLandingConverter() {
                       </p>
                       <span className="text-xs text-slate-500">per document</span>
                     </div>
+                    {tier.description &&
+                      tier.description.trim() !== "" &&
+                      tier.description.trim() !== tier.name.trim() && (
+                        <p className="text-xs text-slate-600 leading-relaxed">{tier.description}</p>
+                      )}
                     <ul className="space-y-2.5 pt-3 border-t border-slate-100 text-xs text-slate-600">
                       <li className="flex items-center gap-2">
                         <Check className="h-3.5 w-3.5 text-emerald-800 shrink-0" aria-hidden="true" />
@@ -1680,15 +1763,19 @@ export function PublicLandingConverter() {
 
             {/* Framed High-Page & Business / Recurring Plans */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-              {/* Above 60 Pages — Custom Price */}
+              {/* Above Max Standard Pages — Custom Price */}
               <div className="lg:col-span-5 rounded-2xl border border-slate-200 border-t-2 border-t-amber-600 bg-white p-7 flex flex-col justify-between space-y-6 shadow-sm">
                 <div className="space-y-4">
                   <div className="flex items-baseline justify-between gap-2">
                     <p className="text-xs font-semibold text-amber-800">Large Documents</p>
-                    <span className="text-xs font-mono text-slate-500 tabular-nums">61+ pages</span>
+                    <span className="text-xs font-mono text-slate-500 tabular-nums">
+                      {maxStandardPages + 1}+ pages
+                    </span>
                   </div>
                   <div>
-                    <h3 className="text-xl font-bold text-slate-900">Above 60 Pages</h3>
+                    <h3 className="text-xl font-bold text-slate-900">
+                      Above {maxStandardPages} Pages
+                    </h3>
                     <div className="mt-2 flex items-baseline gap-2">
                       <p className="text-2xl font-bold font-mono text-slate-900">Custom Price</p>
                       <span className="text-xs text-slate-500">per document</span>
@@ -1701,7 +1788,7 @@ export function PublicLandingConverter() {
                   <ul className="space-y-2 pt-3 border-t border-slate-100 text-xs text-slate-600">
                     <li className="flex items-center gap-2">
                       <Check className="h-3.5 w-3.5 text-amber-700 shrink-0" aria-hidden="true" />
-                      <span>61+ page packets &amp; multi-section books</span>
+                      <span>{maxStandardPages + 1}+ page packets &amp; multi-section books</span>
                     </li>
                     <li className="flex items-center gap-2">
                       <Check className="h-3.5 w-3.5 text-amber-700 shrink-0" aria-hidden="true" />
@@ -1716,7 +1803,7 @@ export function PublicLandingConverter() {
 
                 <button
                   type="button"
-                  onClick={() => openQuoteModal("over_60", "61+ pages")}
+                  onClick={() => openQuoteModal("over_60", `${maxStandardPages + 1}+ pages`)}
                   className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-slate-900 bg-white px-4 py-2.5 text-sm font-semibold text-slate-900 hover:bg-slate-900 hover:text-white transition-colors"
                 >
                   <Mail className="h-4 w-4" aria-hidden="true" />

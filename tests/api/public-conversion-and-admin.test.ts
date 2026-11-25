@@ -126,6 +126,44 @@ describe("Public Conversion Flow, Toggle Enforcement (403) & Pricing Tier Valida
     expect(pubConfig.pricingTiers.some((t) => t.max_pages === 50 && t.price_cents === 799)).toBe(
       true
     );
+
+    // Update the newly added tier via PATCH and verify live reflection on /public/config
+    const patchTierRes = await fetch(`${baseUrl}/api/v1/admin/pricing-tiers/tier_50_799`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "Up to 50 pages (Updated)",
+        priceCents: 849,
+        description: "Updated live tier",
+      }),
+    });
+    expect(patchTierRes.status).toBe(200);
+
+    const updatedPubConfig = (await (await fetch(`${baseUrl}/api/v1/public/config`)).json()) as {
+      ok: boolean;
+      pricingTiers: Array<{ id: string; name: string; max_pages: number; price_cents: number }>;
+    };
+    expect(
+      updatedPubConfig.pricingTiers.some(
+        (t) => t.id === "tier_50_799" && t.name === "Up to 50 pages (Updated)" && t.price_cents === 849
+      )
+    ).toBe(true);
+
+    // Delete the custom tier and verify removal on /public/config
+    const delTierRes = await fetch(`${baseUrl}/api/v1/admin/pricing-tiers/tier_50_799`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    expect(delTierRes.status).toBe(200);
+
+    const afterDeleteConfig = (await (await fetch(`${baseUrl}/api/v1/public/config`)).json()) as {
+      ok: boolean;
+      pricingTiers: Array<{ id: string }>;
+    };
+    expect(afterDeleteConfig.pricingTiers.some((t) => t.id === "tier_50_799")).toBe(false);
   });
 
   it("enforces 403 when feature toggles are disabled and runs full public convert -> preview -> checkout -> unlocked PDF & ZIP download", async () => {
