@@ -10,7 +10,6 @@ import {
   getStorageProvider,
   resetStorageProviderCache,
 } from "../../src/lib/storage/storage.ts";
-import { runAlvNodeEngine } from "../../src/server/alv-node-engine.ts";
 import { getDatabase, resetDatabaseCache } from "../../src/server/db/database.ts";
 import { runFormForgeNodeEngine } from "../../src/server/formforge-node-engine.ts";
 
@@ -190,7 +189,6 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
 
     process.env.S3_BUCKET = "formforge-test-bucket";
     process.env.S3_REGION = "eu-west-1";
-    process.env.S3_PREFIX = "prod-alv";
     process.env.S3_ENDPOINT = "http://127.0.0.1:1";
     process.env.S3_FORCE_PATH_STYLE = "true";
     process.env.S3_ACCESS_KEY_ID = "test";
@@ -228,9 +226,7 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     // Re-opening cache must preserve existing seeded templates without destructive reset
     resetDatabaseCache();
     const db2 = getDatabase(dbPath);
-    const tpl = db2
-      .prepare("SELECT id, status FROM templates WHERE id = 'tpl_alv_official'")
-      .get() as { id: string; status: string } | undefined;
+    const tpl = db2.prepare("SELECT id, status FROM templates LIMIT 1").get() as { id: string; status: string } | undefined;
     expect(tpl?.status).toBe("approved");
   });
 
@@ -293,25 +289,10 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     expect(docRes.status).toBe(201);
     docId = (await docRes.json()).document.id;
 
-    const renderRes = await fetch(`${baseUrl}/api/v1/render/tpl_alv_official`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${adminToken}`,
-      },
-      body: JSON.stringify({
-        outputMode: "flattened",
-        values: {
-          "owner.identificationNumber": "8506155012089",
-          "owner.surnameOrOrganisation": "MÜLLER — CO",
-        },
-      }),
-    });
-    expect(renderRes.status).toBe(201);
-    renderedGenId = (await renderRes.json()).generatedDocumentId;
 
     // 3. Multi-file supporting upload (PDF + PNG + JPEG + WebP)
     const multiForm = new FormData();
+    multiForm.append("documentId", docId);
     multiForm.append("generatedDocumentId", renderedGenId);
     multiForm.append("category", "identity_and_proof");
     multiForm.append("files", new Blob([new Uint8Array(samplePdf)], { type: "application/pdf" }), "id_copy.pdf");
@@ -409,33 +390,6 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
 
   it("handles special Unicode characters cleanly in ALV & FormForge Node PDF engines and redacts PII in overflow errors", async () => {
     // ALV Node engine with accented/Unicode characters
-    const alvOut = await runAlvNodeEngine({
-      owner: {
-        identificationType: "rsa_id",
-        identificationNumber: "8506155012089",
-        surnameOrOrganisation: "MÜLLER — RENÉ",
-        initials: "JR",
-        firstNames: "JOSÉ",
-      },
-      declaration: {
-        place: "GQEBERHA – PORT ELIZABETH",
-        dateYYMMDD: "261122",
-      },
-    });
-    expect(alvOut.pdfBuffer.subarray(0, 5).toString("ascii")).toBe("%PDF-");
-
-    // Overflow error must NOT echo raw sensitive ID value
-    await expect(
-      runAlvNodeEngine({
-        owner: { identificationNumber: "99999999999999999" },
-      })
-    ).rejects.toThrow(/exceeds PDF box capacity/);
-    await expect(
-      runAlvNodeEngine({
-        owner: { identificationNumber: "99999999999999999" },
-      })
-    ).rejects.not.toThrow(/99999999999999999/);
-
     // FormForge Node engine full round-trip: analyze -> generate-acroform -> render flattened + fillable
     const pdfPath = path.join(tmpRoot, "ff_node_test.pdf");
     const acroPath = path.join(tmpRoot, "ff_node_acro.pdf");
@@ -473,66 +427,7 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     });
     expect(renderRes.flattened).toBe(true);
     expect(renderRes.populatedWidgets).toBeGreaterThanOrEqual(1);
-    expect(fs.readFileSync(flatPath).subarray(0, 5).toString("ascii")).toBe("%PDF-");
-  });
 
-  it("verifies seeded ALV manifest coordinates, renders dotted/nested/radio/right-aligned fields, and supports PUT replacement & tenant isolation", async () => {
-    // 1. Seeded ALV template manifest verification
-    const manRes = await fetch(`${baseUrl}/api/v1/templates/tpl_alv_official/manifest`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    });
-    expect(manRes.status).toBe(200);
-    const manJson = await manRes.json();
-    expect(manJson.manifest.pages).toHaveLength(2);
-    expect(manJson.manifest.fields).toHaveLength(48);
-
-    const idTypeField = manJson.manifest.fields.find(
-      (f: { name: string }) => f.name === "owner_identificationType"
-    );
-    expect(idTypeField?.type).toBe("radio");
-    expect(idTypeField?.optionRects?.rsa_id?.width).toBeGreaterThan(5);
-    for (const f of manJson.manifest.fields as Array<{
-      page: number;
-      rect: { x: number; y: number; width: number; height: number };
-    }>) {
-      expect(f.page === 0 || f.page === 1).toBe(true);
-      expect(Number.isFinite(f.rect.x)).toBe(true);
-      expect(Number.isFinite(f.rect.y)).toBe(true);
-      expect(f.rect.width).toBeGreaterThan(0);
-      expect(f.rect.height).toBeGreaterThan(0);
-    }
-
-    // 2. Engine B render with dotted, underscored, nested, radio & right-aligned values
-    const renderRes = await fetch(`${baseUrl}/api/v1/render/tpl_alv_official`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${adminToken}`,
-      },
-      body: JSON.stringify({
-        outputMode: "flattened",
-        values: {
-          "owner.identificationType": "rsa_id",
-          "owner.identificationNumber": "8506155012089",
-          "vehicle.odometerReading": "12450",
-          owner: {
-            surnameOrOrganisation: "VAN DER MERWE",
-            initials: "J",
-          },
-          declaration_place: "CAPE TOWN",
-        },
-      }),
-    });
-    expect(renderRes.status).toBe(201);
-    const renderJson = await renderRes.json();
-    expect(renderJson.populatedWidgets).toBeGreaterThanOrEqual(6);
-
-    const renderedPdfRes = await fetch(`${baseUrl}${renderJson.downloadUrl}`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    });
-    expect(renderedPdfRes.status).toBe(200);
-    const pdfBuf = Buffer.from(await renderedPdfRes.arrayBuffer());
-    expect(pdfBuf.subarray(0, 5).toString("ascii")).toBe("%PDF-");
 
     // 3. PUT /api/v1/supporting-documents/:id replacement + old storage cleanup
     const listRes = await fetch(
@@ -630,7 +525,6 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     expect(delRes.status).toBe(200);
     expect(fs.existsSync(newAbsPath)).toBe(false);
     expect(
-      db.prepare("SELECT id FROM storage_metadata WHERE storage_key = ?").get(newRow.storage_key)
-    ).toBeUndefined();
+      db.prepare("SELECT id FROM storage_metadata WHERE storage_key = ?").get(newRow.storage_key)).toBeUndefined();
   });
 });

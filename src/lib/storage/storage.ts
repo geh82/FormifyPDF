@@ -17,7 +17,7 @@ import {
   isRegularNonSymlinkFile,
   validatePdfBufferSignature,
 } from "../../server/formforge-storage.ts";
-import { isValidDocumentId } from "../validation/alv-schema.ts";
+function isValidDocumentId(id: unknown): id is string { return typeof id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(id); }
 
 export interface StorageScopeOptions {
   tenantId?: string;

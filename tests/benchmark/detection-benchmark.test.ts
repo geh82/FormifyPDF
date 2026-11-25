@@ -78,7 +78,7 @@ function evaluateDetectionBenchmark(
 
 function loadAlvGroundTruth(pageFilter?: number): BenchmarkTarget[] {
   const raw = JSON.parse(
-    fs.readFileSync(path.resolve(process.cwd(), "src/lib/alv/field_map.json"), "utf-8")
+    fs.readFileSync(path.resolve(process.cwd(), "tests/benchmark/fixtures/bench_field_map.json"), "utf-8")
   ) as { fields: Record<string, any> };
 
   const tupleToRect = (t: number[]): PdfRect => ({
@@ -142,7 +142,7 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
   });
 
   it("Scenario 1: Digital multi-page government form achieves >=95% recall, >=0.85 mean IoU, and preserves comb char grids", async () => {
-    const alvPdf = path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf");
+    const alvPdf = path.resolve(process.cwd(), "tests/benchmark/fixtures/bench_form.pdf");
     const out = await runFormForgeNodeEngine<{
       manifest: FieldManifest;
       ocrJobs: any[];
@@ -173,7 +173,7 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
   });
 
   it("Scenario 2: Scanned image-only PDF triggers offline CV + Tesseract OCR and achieves >=90% recall", async () => {
-    const alvPdf = path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf");
+    const alvPdf = path.resolve(process.cwd(), "tests/benchmark/fixtures/bench_form.pdf");
     const { png } = await renderPdfPagePngBuffer(alvPdf, 0, 160);
 
     const scanDoc = await PDFDocument.create();
