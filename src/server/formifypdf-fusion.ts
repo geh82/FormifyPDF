@@ -23,6 +23,7 @@ import type {
 
 export interface MergedTextLabel {
   text: string;
+  lines?: string[];
   x0: number;
   y0: number;
   x1: number;
@@ -31,6 +32,7 @@ export interface MergedTextLabel {
   isHeaderLike: boolean;
   isInstructionLike: boolean;
   isSubCaption: boolean;
+  isInlinePlaceholder?: boolean;
   hasColon: boolean;
   source: "pdf_text" | "ocr_tesseract" | "ocr_paddleocr";
 }
@@ -90,13 +92,73 @@ function isPurePunctuationOrPlaceholder(txt: string): boolean {
   return /^[_\.\-\s\[\]\(\)\|\/:;,*]+$/.test(txt.trim());
 }
 
+function isPureConnectorText(txt: string): boolean {
+  const clean = txt
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!clean) return true;
+  return /^(or|of|and|en|or of|and en|or\/of|and\/en)$/.test(clean);
+}
+
+function isInlinePlaceholderText(txt: string): boolean {
+  return /(?:[_\.]{4,}|(?:\.\s*){4,})/.test(txt);
+}
+
+function normalizeTextKerningArtifacts(txt: string): string {
+  return txt
+    .replace(/\bnam\s+es\b/gi, "names")
+    .replace(/\bvoornam\s+e\b/gi, "voorname")
+    .replace(/\bM\s+OTOR\b/g, "MOTOR")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const SECONDARY_LANGUAGE_MARKERS =
+  /\b(verkeersregisternr|buitelandse|besigh|posadres|straatadres|geen\s+odometer|gesleep|links|middel|regs|eienaar|instelling|gevolmagtigde|verteenwoordiger|naam|handtekening|datum|voorletters|voorname|nommer|kode|poskode|stuurwiel|onderstelnommer|lisensienommer|fabrikaat|reeksnaam|selfoonnommer)\b/i;
+
+function cleanOptionBoxLines(lines: string[]): string {
+  const normalized = lines.map((l) => normalizeTextKerningArtifacts(l)).filter(Boolean);
+  if (normalized.length === 0) return "";
+  if (normalized.length === 1) {
+    const single = normalized[0];
+    // Handle exact repeated phrases on one line (e.g. "RSA ID RSA ID")
+    const words = single.split(/\s+/);
+    if (words.length >= 2 && words.length % 2 === 0) {
+      const half = words.length / 2;
+      const left = words.slice(0, half).join(" ");
+      const right = words.slice(half).join(" ");
+      if (left.toLowerCase() === right.toLowerCase()) return left;
+    }
+    return single;
+  }
+  if (normalized.length === 2) {
+    const [l1, l2] = normalized;
+    if (l1.toLowerCase() === l2.toLowerCase()) return l1;
+    if (SECONDARY_LANGUAGE_MARKERS.test(l2) && !SECONDARY_LANGUAGE_MARKERS.test(l1)) {
+      return l1;
+    }
+    // Two distinct lines that form a bilingual translation pair where line 1 is complete
+    const l1Complete = !/\b(of|and|or|to|for|in|at|the|a|an|with)$/i.test(l1);
+    if (l1Complete && lines.length === 2 && l2.split(/\s+/).length >= 1) {
+      // Check if second line is short single-line mirror translation (common in stacked bilingual boxes)
+      const sharedWords = l1.toLowerCase().split(/\s+/).filter((w) => l2.toLowerCase().includes(w));
+      if (sharedWords.length > 0 || SECONDARY_LANGUAGE_MARKERS.test(l2)) {
+        return l1;
+      }
+    }
+  }
+  return normalized.join(" ").replace(/\s+/g, " ").trim();
+}
+
 function isSubCaptionText(txt: string, fontSize: number): boolean {
   const clean = txt.trim();
   if (/^\([^)]{2,60}\)$/.test(clean)) return true;
   if (fontSize <= 8.0 && /^\([a-zA-Z0-9\s\/,\.\-]{2,45}$/.test(clean)) return true;
   if (
     fontSize <= 8.2 &&
-    /^(code\/kode|number\/nommer|initials\/voorletters|describe in full|postal code|poskode|date format|yyyy|dd\/mm|mm\/dd)/i.test(
+    /^(code\/kode|number\/nommer|initials\/voorletters|describe in full|postal code|poskode|date format|yyyy|dd\/mm|mm\/dd|y\/j|km\s+hour\/uur)/i.test(
       clean
     )
   ) {
@@ -108,14 +170,25 @@ function isSubCaptionText(txt: string, fontSize: number): boolean {
 /**
  * Clean bilingual parentheticals or dual-language slash labels while preserving distinct choice pairs.
  * e.g. "(code/kode)" -> "(code)", "(postal code/poskode)" -> "(postal code)",
- * "no odometer / geen odometer" -> "no odometer".
+ * "Name/Naam" -> "Name", "Signature/Handtekening" -> "Signature", "Date/Datum" -> "Date".
  */
 function cleanSubCaptionLabel(txt: string): string {
-  let cleaned = txt.trim().replace(/^[:(\s]+|[:)\s]+$/g, "");
-  const slashParts = cleaned.split(/\s*\/\s*/).map((s) => s.trim()).filter(Boolean);
+  let cleaned = normalizeTextKerningArtifacts(txt)
+    .replace(/^[:(\s]+|[:)\s]+$/g, "");
+  const slashParts = cleaned
+    .split(/\s*\/\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
   if (slashParts.length === 2 && slashParts[0].length >= 2 && slashParts[1].length >= 2) {
-    // Keep English / first primary language term for dual-language form captions
-    if (!/^(yes|no|male|female|mr|mrs|ms|dr|m|f|y|n)$/i.test(slashParts[0])) {
+    const p1 = slashParts[1].toLowerCase();
+    const isBilingualMirrorSlash =
+      SECONDARY_LANGUAGE_MARKERS.test(p1) ||
+      /^(kode|nommer|voorletters|voorname|poskode|naam|handtekening|datum|uur)$/.test(p1);
+    if (
+      isBilingualMirrorSlash ||
+      (!/^(yes|no|male|female|mr|mrs|ms|dr|m|f|y|n|town|vin|name|organisation)$/i.test(p1) &&
+        !/^(surname|city|chassis)/i.test(slashParts[0]))
+    ) {
       cleaned = slashParts[0];
     }
   }
@@ -131,7 +204,7 @@ function isInstructionOrBannerText(
 } {
   const clean = txt.trim();
   const lower = clean.toLowerCase();
-  const hasDottedPlaceholder = /(?:[_\.]{4,}|(?:\.\s*){5,})/.test(clean);
+  const hasDottedPlaceholder = isInlinePlaceholderText(clean);
   const effectiveLen = clean.replace(/[_\.\s]+/g, " ").trim().length;
   const isAllCapsLong =
     clean.length >= 8 &&
@@ -149,7 +222,7 @@ function isInstructionOrBannerText(
     /^(section|part|schedule|annexure|chapter)\s+[a-z0-9]/i.test(clean) ||
     isBannerUpperPhrase ||
     (fontSize >= 11.2 && clean === clean.toUpperCase() && clean.length >= 6) ||
-    (isAllCapsLong && fontSize >= 8.5);
+    (isAllCapsLong && fontSize >= 7.8 && !/^(TURN OVER|BLAAI OM)$/i.test(clean));
 
   const isInstruction =
     (!hasDottedPlaceholder && clean.length > 78) ||
@@ -245,11 +318,11 @@ export function buildMergedTextLabels(
   }
 
   const lineLabels: MergedTextLabel[] = groups.map((grp) => {
-    const text = grp
-      .map((g) => g.text)
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
+    const text = normalizeTextKerningArtifacts(
+      grp
+        .map((g) => g.text)
+        .join(" ")
+    );
     const x0 = Math.min(...grp.map((g) => g.x0));
     const y0 = Math.min(...grp.map((g) => g.y0));
     const x1 = Math.max(...grp.map((g) => g.x1));
@@ -258,6 +331,7 @@ export function buildMergedTextLabels(
     const { isHeader, isInstruction } = isInstructionOrBannerText(text, fontSize);
     return {
       text,
+      lines: [text],
       x0,
       y0,
       x1,
@@ -266,6 +340,7 @@ export function buildMergedTextLabels(
       isHeaderLike: isHeader,
       isInstructionLike: isInstruction,
       isSubCaption: isSubCaptionText(text, fontSize),
+      isInlinePlaceholder: isInlinePlaceholderText(text),
       hasColon: text.endsWith(":"),
       source,
     };
@@ -277,13 +352,14 @@ export function buildMergedTextLabels(
 
   for (let i = 0; i < lineLabels.length; i++) {
     if (consumed[i]) continue;
-    const base = { ...lineLabels[i] };
+    const base = { ...lineLabels[i], lines: [...(lineLabels[i].lines ?? [lineLabels[i].text])] };
     consumed[i] = true;
 
     if (
       !base.isHeaderLike &&
       !base.isInstructionLike &&
       !base.isSubCaption &&
+      !base.isInlinePlaceholder &&
       !isPurePunctuationOrPlaceholder(base.text) &&
       base.x1 - base.x0 <= 185
     ) {
@@ -299,6 +375,7 @@ export function buildMergedTextLabels(
           cand.isHeaderLike ||
           cand.isInstructionLike ||
           cand.isSubCaption ||
+          cand.isInlinePlaceholder ||
           isPurePunctuationOrPlaceholder(cand.text)
         ) {
           continue;
@@ -308,11 +385,14 @@ export function buildMergedTextLabels(
         const alignedCenter =
           Math.abs((cand.x0 + cand.x1) / 2 - (base.x0 + base.x1) / 2) <= 12.0;
         const similarFont = Math.abs(cand.fontSize - base.fontSize) <= 2.0;
+        const baseEndsIncomplete =
+          /\b(and|or|of|for|to|in|at|with|by|the|a|an|if|van|en|se)\s*$/i.test(base.text) ||
+          /[\/\-&,]\s*$/.test(base.text);
         const isContinuationPhrase =
           candW <= 165 &&
           !cand.text.includes(".") &&
           cand.text.length <= 36 &&
-          (/^[a-z(]/.test(cand.text) || base.text.split(" ").length >= 2) &&
+          (/^[a-z(]/.test(cand.text) || baseEndsIncomplete) &&
           !base.hasColon;
 
         if (
@@ -326,6 +406,7 @@ export function buildMergedTextLabels(
             Math.max(base.x1, cand.x1)
           )
         ) {
+          base.lines!.push(cand.text);
           base.text = `${base.text} ${cand.text}`.replace(/\s+/g, " ").trim();
           base.x0 = Math.min(base.x0, cand.x0);
           base.y1 = Math.max(base.y1, cand.y1);
@@ -837,7 +918,7 @@ export function inferSemanticType(
     return { type: "currency", required, multiline, options, validation, alignment };
   }
   if (
-    /(number|nommer|qty|quantity|count|age|year|postal code|zip code|poskode|id no|passport|account no|vin|licence|license|odometer)/.test(
+    /\b(number|nommer|qty|quantity|count|age|year|postal code|zip code|poskode|id no|passport|account no|vin|licence|license|odometer)\b/.test(
       lbl
     )
   ) {
@@ -914,23 +995,38 @@ export function findBestAssociatedLabel(
   let bestBelowSubCaption = "";
   let bestBelowScore = 1e9;
 
-  const hasAnotherFieldBetweenLeft = (lx1: number): boolean => {
+  const hasAnotherFieldBetweenLeft = (
+    lx1: number,
+    skipSingleCheckboxes = false
+  ): boolean => {
     if (!candidateList) return false;
     return candidateList.some((c) => {
+      const cw = c.x1 - c.x0;
+      const ch = c.y1 - c.y0;
       const cMidY = (c.y0 + c.y1) / 2;
-      if (Math.abs(cMidY - rmidY) > 12) return false;
-      return c.x0 >= lx1 - 2 && c.x1 <= rx0 + 4 && c.x1 - c.x0 >= 14;
+      if (Math.abs(cMidY - rmidY) > 10.5) return false;
+      // Allow a row-left primary prompt to span past a small inline toggle/checkbox (e.g. "[no odometer] or [______]")
+      if (skipSingleCheckboxes && cw <= 72 && ch <= 26) return false;
+      return c.x0 >= lx1 - 2 && c.x1 <= rx0 + 4 && cw >= 14;
     });
   };
 
   for (const lbl of labels) {
-    const txt = lbl.text.trim();
-    if (txt.length < 2 || isPurePunctuationOrPlaceholder(txt)) continue;
+    const txt = normalizeTextKerningArtifacts(lbl.text);
+    if (
+      txt.length < 2 ||
+      isPurePunctuationOrPlaceholder(txt) ||
+      isPureConnectorText(txt) ||
+      lbl.isInlinePlaceholder
+    ) {
+      continue;
+    }
     if (lbl.isHeaderLike || lbl.isInstructionLike) continue;
 
     const lmidY = (lbl.y0 + lbl.y1) / 2;
+    const boxH = ry1 - ry0;
 
-    // Parenthetical sub-caption immediately BELOW this field (within 11pt under box)
+    // Parenthetical sub-caption immediately BELOW this field (within 11.5pt under box)
     if (lbl.isSubCaption && !isSmallControl) {
       const horizOverlap = Math.min(rx1, lbl.x1) - Math.max(rx0, lbl.x0);
       if (
@@ -948,9 +1044,16 @@ export function findBestAssociatedLabel(
       continue;
     }
 
-    // 1. Left label on roughly same row
-    if (lbl.x1 <= rx0 + 14 && Math.abs(lmidY - rmidY) <= 15) {
-      if (!hasAnotherFieldBetweenLeft(lbl.x1)) {
+    // 1. Left label on same row (strict vertical alignment so stacked sub-lines don't steal adjacent Suburb/City rows)
+    const rowTolY =
+      boxH >= 24 ? Math.max(12, boxH * 0.6) : Math.abs(lbl.y1 - lbl.y0) >= 18 ? 11.0 : 9.2;
+    const topEdgeAlignForTall =
+      boxH >= 24 && lbl.y0 >= ry0 - 6 && lbl.y0 <= ry0 + 18;
+    if (
+      lbl.x1 <= rx0 + 14 &&
+      (Math.abs(lmidY - rmidY) <= rowTolY || topEdgeAlignForTall)
+    ) {
+      if (!hasAnotherFieldBetweenLeft(lbl.x1, false)) {
         const dist = Math.max(0, rx0 - lbl.x1) + Math.abs(lmidY - rmidY) * 1.4;
         if (dist < 280 && dist < bestLeftScore) {
           bestLeftScore = dist;
@@ -962,7 +1065,7 @@ export function findBestAssociatedLabel(
     // 2. Directly above label
     if (lbl.y1 <= ry0 + 6 && ry0 - lbl.y1 <= 22) {
       const horizOverlap = Math.min(rx1, lbl.x1) - Math.max(rx0, lbl.x0);
-      if (horizOverlap > -16) {
+      if (horizOverlap > -10) {
         const dist =
           Math.max(0, ry0 - lbl.y1) * 2.2 + Math.abs(rx0 - lbl.x0) * 0.35;
         if (dist < 115 && dist < bestAboveScore) {
@@ -989,34 +1092,85 @@ export function findBestAssociatedLabel(
 
   if (isSmallControl && bestRightText && bestRightScore <= 38) {
     return {
-      label: bestRightText.replace(/[:*]+$/, "").trim(),
+      label: cleanSubCaptionLabel(bestRightText.replace(/[:*]+$/, "").trim()),
       score: bestRightScore,
     };
   }
   if (bestLeftText && (!bestAboveText || bestLeftScore <= bestAboveScore * 1.45)) {
-    const cleanLeft = bestLeftText.replace(/[:]+$/, "").trim();
-    const combined =
+    const cleanLeft = cleanSubCaptionLabel(bestLeftText.replace(/[:]+$/, "").trim());
+    let combined = cleanLeft;
+    const isDateUnitSub = /^(y\/j|yy|ccyy|mm|dd|m|d)$/i.test(bestBelowSubCaption);
+    if (
       bestBelowSubCaption &&
+      !isDateUnitSub &&
       !cleanLeft.toLowerCase().includes(bestBelowSubCaption.toLowerCase())
-        ? `${cleanLeft} (${bestBelowSubCaption})`
-        : cleanLeft;
+    ) {
+      combined = `${cleanLeft} (${bestBelowSubCaption})`;
+    } else if (
+      bestBelowSubCaption &&
+      /^(initials|first names)$/i.test(bestBelowSubCaption) &&
+      /^initials\b/i.test(cleanLeft)
+    ) {
+      // "Initials and first names" paired with "(initials)" sub-caption -> concise "Initials"
+      combined = "Initials";
+    }
     return { label: combined, score: bestLeftScore };
   }
   if (bestBelowSubCaption && (!bestAboveText || bestBelowScore <= 6)) {
-    // Sub-caption directly under an otherwise unlabeled field row (e.g. Postal code)
+    // Sub-caption directly under an otherwise unlabeled field row (e.g. Postal code, First names)
     const capitalized =
       bestBelowSubCaption.charAt(0).toUpperCase() + bestBelowSubCaption.slice(1);
     return { label: capitalized, score: 12 + bestBelowScore };
   }
   if (bestAboveText) {
     return {
-      label: bestAboveText.replace(/[:]+$/, "").trim(),
+      label: cleanSubCaptionLabel(bestAboveText.replace(/[:]+$/, "").trim()),
       score: bestAboveScore,
     };
   }
+  // Fallback for wide radio/choice rows introduced by a short left-margin lead-in on the row above (e.g. "I, the" -> [owner | proxy | representative])
+  if (!isSmallControl && rx1 - rx0 >= 140) {
+    let bestLeadIn = "";
+    let bestLeadScore = 1e9;
+    for (const lbl of labels) {
+      const txt = normalizeTextKerningArtifacts(lbl.text);
+      if (
+        txt.length < 2 ||
+        lbl.isHeaderLike ||
+        lbl.isInstructionLike ||
+        lbl.isSubCaption ||
+        lbl.isInlinePlaceholder ||
+        isPurePunctuationOrPlaceholder(txt) ||
+        isPureConnectorText(txt)
+      ) {
+        continue;
+      }
+      if (lbl.x0 <= 60 && lbl.x1 <= rx0 && lbl.y1 <= ry0 + 2 && ry0 - lbl.y1 <= 16) {
+        const hasFieldOnLabelRow =
+          candidateList?.some(
+            (c) =>
+              c.x0 > lbl.x1 &&
+              Math.abs((c.y0 + c.y1) / 2 - (lbl.y0 + lbl.y1) / 2) <= 9.5
+          ) ?? false;
+        if (!hasFieldOnLabelRow) {
+          const dist = ry0 - lbl.y1 + (rx0 - lbl.x1) * 0.15;
+          if (dist < bestLeadScore) {
+            bestLeadScore = dist;
+            bestLeadIn = txt;
+          }
+        }
+      }
+    }
+    if (bestLeadIn) {
+      return {
+        label: cleanSubCaptionLabel(bestLeadIn.replace(/[:]+$/, "").trim()),
+        score: 25 + bestLeadScore,
+      };
+    }
+  }
   if (bestRightText) {
     return {
-      label: bestRightText.replace(/[:*]+$/, "").trim(),
+      label: cleanSubCaptionLabel(bestRightText.replace(/[:*]+$/, "").trim()),
       score: bestRightScore,
     };
   }
@@ -1533,10 +1687,34 @@ function fuseAndClassifyPageGeometryCore(params: {
     });
 
     if (cw >= 7.0 && cw <= 30.0 && ch >= 7.5 && ch <= 34.0) {
+      // Check for double-wide date sub-box bisected by a centered ':', '/', '-', or '|' divider (e.g. [ 2:0 |  :  |  :  |  :  ])
+      const bisectRun =
+        cw >= 20.0 &&
+        geom.textRuns.find((tr) => {
+          if (!/^[:/\-|]$/.test(tr.text.trim())) return false;
+          const cx = (tr.x0 + tr.x1) / 2;
+          const cy = (tr.y0 + tr.y1) / 2;
+          const boxMidX = (cell.x0 + cell.x1) / 2;
+          return (
+            Math.abs(cx - boxMidX) <= cw * 0.22 &&
+            cy >= cell.y0 - 2 &&
+            cy <= cell.y1 + 2
+          );
+        });
+      if (bisectRun && !boxContainsPrintedDigits(cell)) {
+        const splitX = roundPt((bisectRun.x0 + bisectRun.x1) / 2);
+        emptySmallBoxes.push(
+          { x0: cell.x0, y0: cell.y0, x1: splitX, y1: cell.y1, source: cell.source },
+          { x0: splitX, y0: cell.y0, x1: cell.x1, y1: cell.y1, source: cell.source }
+        );
+        continue;
+      }
+
       if (overlappingLabels.length === 0 && !boxContainsPrintedDigits(cell)) {
         emptySmallBoxes.push(cell);
       } else if (overlappingLabels.length > 0) {
-        const optTxt = overlappingLabels.map((t) => t.text).join(" ").trim();
+        const optLines = overlappingLabels.flatMap((t) => t.lines ?? [t.text]);
+        const optTxt = cleanOptionBoxLines(optLines);
         if (
           optTxt.length <= 28 &&
           ch >= 11 &&
@@ -1559,7 +1737,8 @@ function fuseAndClassifyPageGeometryCore(params: {
       overlappingLabels.length > 0 &&
       !overlappingLabels.some((t) => t.isHeaderLike || t.isInstructionLike)
     ) {
-      const optTxt = overlappingLabels.map((t) => t.text).join(" ").trim();
+      const optLines = overlappingLabels.flatMap((t) => t.lines ?? [t.text]);
+      const optTxt = cleanOptionBoxLines(optLines);
       if (optTxt.length >= 2 && optTxt.length <= 80) {
         overlappingLabels.forEach((l) => consumedOptionLabels.add(l));
         optionLabeledBoxes.push({
@@ -1574,8 +1753,31 @@ function fuseAndClassifyPageGeometryCore(params: {
     }
   }
 
-  // Filter out option-box labels when pairing external field prompts so option choices never bleed onto adjacent rows
-  const externalPromptLabels = labels.filter((l) => !consumedOptionLabels.has(l));
+  // Filter out option-box labels, right-column translation mirrors of left-margin labels,
+  // pure connectors, and inline dotted placeholder prompts from externalPromptLabels.
+  const rightMirrorLabels = new Set<MergedTextLabel>();
+  for (const rLbl of labels) {
+    if (rLbl.x0 < pageW * 0.50 || rLbl.isHeaderLike || rLbl.isInstructionLike) continue;
+    const hasLeftMirror = labels.some(
+      (lLbl) =>
+        lLbl !== rLbl &&
+        lLbl.x0 <= 60 &&
+        !lLbl.isHeaderLike &&
+        !lLbl.isInstructionLike &&
+        !lLbl.isInlinePlaceholder &&
+        Math.abs(lLbl.y0 - rLbl.y0) <= 3.5
+    );
+    if (hasLeftMirror) rightMirrorLabels.add(rLbl);
+  }
+
+  const externalPromptLabels = labels.filter(
+    (l) =>
+      !consumedOptionLabels.has(l) &&
+      !rightMirrorLabels.has(l) &&
+      !l.isInlinePlaceholder &&
+      !isPureConnectorText(l.text)
+  );
+  const consumedBelowCaptionLabels = new Set<MergedTextLabel>();
 
   // Stage 3: Group character cells & tick combs
   const { groups: charGroups, leftover: leftoverSmall } = clusterCharCells(
@@ -1744,7 +1946,8 @@ function fuseAndClassifyPageGeometryCore(params: {
     const rowPrompt = findBestAssociatedLabel(
       [gx0, gy0, gx1, gy1],
       externalPromptLabels,
-      false
+      false,
+      candidates.map((c) => ({ x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1 }))
     );
     const optionRects: Record<string, PdfRect> = {};
     const options: string[] = [];
@@ -1919,8 +2122,40 @@ function fuseAndClassifyPageGeometryCore(params: {
     );
     if (bordersShadedBanner) continue;
 
-    // Skip full-width page divider rules and horizontal lines cutting across radio/char_cells rows
-    if (h.x0 <= 32 && h.x1 >= pageW - 32) continue;
+    // Skip full-width page divider rules (including segmented frame bottom borders bridged across <= 12pt gaps)
+    const rowSegments = mergedH
+      .filter((other) => Math.abs(other.y0 - h.y0) <= 2.0)
+      .sort((a, b) => a.x0 - b.x0);
+    let spanStart = h.x0;
+    let spanEnd = h.x1;
+    if (rowSegments.length > 1) {
+      let curX0 = rowSegments[0].x0;
+      let curX1 = rowSegments[0].x1;
+      for (let ri = 1; ri < rowSegments.length; ri++) {
+        const seg = rowSegments[ri];
+        if (seg.x0 <= curX1 + 12.0) {
+          curX1 = Math.max(curX1, seg.x1);
+        } else {
+          if (h.x0 >= curX0 - 1 && h.x1 <= curX1 + 1) {
+            spanStart = curX0;
+            spanEnd = curX1;
+          }
+          curX0 = seg.x0;
+          curX1 = seg.x1;
+        }
+      }
+      if (h.x0 >= curX0 - 1 && h.x1 <= curX1 + 1) {
+        spanStart = curX0;
+        spanEnd = curX1;
+      }
+    }
+    if (
+      spanStart <= 34 &&
+      spanEnd >= pageW - 34 &&
+      spanEnd - spanStart >= pageW * 0.84
+    ) {
+      continue;
+    }
 
     // Skip lines sitting near or inside char grids or radio option rows
     const overlapsStructuredRow = candidates.some(
@@ -1943,19 +2178,30 @@ function fuseAndClassifyPageGeometryCore(params: {
     );
     if (adjacentHeader) continue;
 
-    // Skip horizontal lines directly under prose sentence fragments ending in a period (e.g. paragraph separator rule)
+    // Skip horizontal lines directly under prose sentence fragments ending in a period (e.g. declaration paragraph bottom border)
     const underProseSentence = labels.some(
       (l) =>
-        !/(?:[_\.]{4,}|(?:\.\s*){5,})/.test(l.text) &&
+        !l.isInlinePlaceholder &&
         /\.$/.test(l.text.trim()) &&
         l.text.trim().split(/\s+/).length >= 3 &&
         h.y0 >= l.y1 - 2 &&
-        h.y0 - l.y1 <= 14 &&
+        h.y0 - l.y1 <= 18.5 &&
         Math.min(h.x1, l.x1) - Math.max(h.x0, l.x0) > 20
     );
     if (underProseSentence) continue;
 
-    // Skip wide horizontal rule separators (>= 60% page width) that have labels sitting directly ABOVE or crossing them with no left label
+    // Skip horizontal frame lines directly below static date axis sub-captions (e.g. "Y/J   M   D")
+    const underDateAxisCaption = labels.some(
+      (l) =>
+        /^(y\/j|yy|ccyy|mm|dd|m|d)$/i.test(l.text.trim()) &&
+        h.y0 >= l.y1 - 1 &&
+        h.y0 - l.y1 <= 8.0 &&
+        l.x0 >= h.x0 - 4 &&
+        l.x1 <= h.x1 + 4
+    );
+    if (underDateAxisCaption) continue;
+
+    // Skip wide horizontal rule separators (>= 55% page width) that have labels sitting directly ABOVE or crossing them
     const isWideRuleWithTextOnTop =
       hw > pageW * 0.55 &&
       labels.some(
@@ -1968,7 +2214,7 @@ function fuseAndClassifyPageGeometryCore(params: {
       );
     if (isWideRuleWithTextOnTop) continue;
 
-    // Check if concise caption sits directly BELOW the line (signature / name caption style)
+    // Check if concise caption sits directly BELOW the line (signature / name / date caption style)
     let belowLbl = "";
     const belowMatches = externalPromptLabels.filter(
       (l) =>
@@ -1980,7 +2226,8 @@ function fuseAndClassifyPageGeometryCore(params: {
         Math.min(h.x1, l.x1) - Math.max(h.x0, l.x0) > 12
     );
     if (belowMatches.length > 0 && belowMatches[0].text.length <= 42) {
-      belowLbl = belowMatches[0].text.replace(/[:()]+/g, "").trim();
+      belowMatches.forEach((bm) => consumedBelowCaptionLabels.add(bm));
+      belowLbl = cleanSubCaptionLabel(belowMatches[0].text.replace(/[:()]+/g, "").trim());
     }
 
     standaloneUnderlines.push({
@@ -1999,12 +2246,24 @@ function fuseAndClassifyPageGeometryCore(params: {
       /^([A-Za-z0-9 /()-]{2,45}?):?\s*((?:(?:\.\s*){5,}|[_\.]{4,}))(?:\s+[A-Za-z/()-]{2,30})?\s*$/
     );
     if (m) {
-      const prefix = cleanSubCaptionLabel(m[1]);
+      const prefixRaw = m[1].trim();
+      const prefix = cleanSubCaptionLabel(prefixRaw);
       const matchStart = lbl.text.indexOf(m[2]);
       const matchEnd = matchStart + m[2].length;
+      const suffixRaw = lbl.text.slice(matchEnd).trim();
       const len = Math.max(1, lbl.text.length);
-      const ux0 = lbl.x0 + (lbl.x1 - lbl.x0) * (matchStart / len);
-      const ux1 = lbl.x0 + (lbl.x1 - lbl.x0) * (matchEnd / len);
+      const fs = Math.max(6.5, lbl.fontSize || 8.5);
+      const ux0 = Math.max(
+        lbl.x0 + (lbl.x1 - lbl.x0) * (matchStart / len),
+        lbl.x0 + prefixRaw.length * fs * 0.56 + 6
+      );
+      const ux1 =
+        suffixRaw.length > 0
+          ? Math.min(
+              lbl.x0 + (lbl.x1 - lbl.x0) * (matchEnd / len),
+              lbl.x1 - suffixRaw.length * fs * 0.52 - 4
+            )
+          : lbl.x0 + (lbl.x1 - lbl.x0) * (matchEnd / len);
       if (ux1 - ux0 >= 28 && prefix.length >= 2) {
         standaloneUnderlines.push({
           x0: ux0,
@@ -2146,6 +2405,10 @@ function fuseAndClassifyPageGeometryCore(params: {
     y1: c.y1,
   }));
 
+  const promptLabelsAfterUnderlines = externalPromptLabels.filter(
+    (l) => !consumedBelowCaptionLabels.has(l)
+  );
+
   for (const cand of candidates) {
     const rw = cand.x1 - cand.x0;
     const rh = cand.y1 - cand.y0;
@@ -2210,10 +2473,10 @@ function fuseAndClassifyPageGeometryCore(params: {
 
     const isSmall = cand.kind === "checkbox" || cand.kind === "radio";
     const lblRes = cand.explicitLabel
-      ? { label: cand.explicitLabel, score: 0 }
+      ? { label: cleanSubCaptionLabel(cand.explicitLabel), score: 0 }
       : findBestAssociatedLabel(
           [cand.x0, cand.y0, cand.x1, cand.y1],
-          externalPromptLabels,
+          promptLabelsAfterUnderlines,
           isSmall,
           candidateBoxes
         );
@@ -2276,7 +2539,7 @@ function fuseAndClassifyPageGeometryCore(params: {
 
     pageFields.push({
       id: "",
-      name: uniqueName(finalLabel),
+      name: "",
       label: finalLabel,
       type: semantic.type,
       page: geom.pageIndex,
@@ -2316,12 +2579,201 @@ function fuseAndClassifyPageGeometryCore(params: {
     });
   }
 
-  // Reading-order sort: top-to-bottom bands (10pt), left-to-right
+  // Reading-order sort: top-to-bottom bands (9pt), left-to-right
   pageFields.sort((a, b) => {
-    const ry = Math.round(a.rect.y / 10) - Math.round(b.rect.y / 10);
+    const ry = Math.round(a.rect.y / 9) - Math.round(b.rect.y / 9);
     if (ry !== 0) return ry;
     return a.rect.x - b.rect.x;
   });
+
+  // Post-fusion contextual refinement pass:
+  // 1) Inherit row-left prompt onto split same-row sibling fields (e.g. phone code + number, surname + initials, no-odometer + odometer reading)
+  // 2) Inherit stacked multi-line address / description grid rows (Line 2, Line 3)
+  // 3) Prefix multi-column official underline groups with left-margin row context (Counter official, Data capturing official)
+  const applyRefinedLabel = (
+    fld: DetectedFormField,
+    newLabel: string,
+    reason: string,
+    boostConfidence = 0.88
+  ) => {
+    const clean = newLabel.trim();
+    const prevType = fld.type;
+    fld.label = clean;
+    fld.originalLabelText = clean;
+    const geomKindForSemantic =
+      prevType === "char_cells" ||
+      prevType === "checkbox" ||
+      prevType === "radio" ||
+      prevType === "dropdown" ||
+      prevType === "listbox" ||
+      prevType === "multiline"
+        ? prevType
+        : "box";
+    const sem = inferSemanticType(
+      clean,
+      fld.rect.width,
+      fld.rect.height,
+      geomKindForSemantic,
+      fld.cellRects?.length || 0
+    );
+    fld.type = sem.type;
+    fld.validation = sem.validation;
+    if (sem.maxLength) fld.maxLength = sem.maxLength;
+    fld.alignment = sem.alignment;
+    if (fld.confidence < boostConfidence) {
+      fld.confidence = boostConfidence;
+      fld.confidenceTier = "high";
+      fld.reviewFlagReason = undefined;
+    }
+    if (!fld.confidenceEvidence.includes(reason)) {
+      fld.confidenceEvidence.push(reason);
+    }
+  };
+
+  for (let i = 0; i < pageFields.length; i++) {
+    const cur = pageFields[i];
+    if (cur.detectionSource === "existing_acroform") continue;
+
+    // 1a. Split same-row sibling field whose detected label is only a short sub-caption (e.g. "Number") or empty
+    const isShortSubOnly =
+      cur.originalLabelText === "" ||
+      /^(number|initials|code|extension|ext)$/i.test(cur.originalLabelText.trim());
+    if (isShortSubOnly && cur.type !== "checkbox" && cur.type !== "radio") {
+      // Find closest left sibling on the same row
+      let leftSib: DetectedFormField | null = null;
+      for (let k = i - 1; k >= 0; k--) {
+        const candSib = pageFields[k];
+        if (Math.abs(candSib.rect.y - cur.rect.y) <= 5.5 && candSib.rect.x < cur.rect.x) {
+          leftSib = candSib;
+          break;
+        }
+      }
+      if (leftSib && leftSib.originalLabelText) {
+        const gapFromSib = cur.rect.x - (leftSib.rect.x + leftSib.rect.width);
+        if (gapFromSib >= -2 && gapFromSib <= 75) {
+          const sibBase = leftSib.originalLabelText.replace(/\s*\([^)]+\)\s*$/, "").trim();
+          const curSub = cur.originalLabelText.trim().toLowerCase();
+          if (
+            curSub &&
+            !leftSib.originalLabelText.toLowerCase().includes(`(${curSub})`) &&
+            curSub !== sibBase.toLowerCase()
+          ) {
+            applyRefinedLabel(
+              cur,
+              `${sibBase} (${curSub})`,
+              `Inherited left-row sibling context '${sibBase}' for split field (${curSub})`
+            );
+            continue;
+          }
+          if (!cur.originalLabelText && /surname\s+and\s+initials/i.test(sibBase)) {
+            applyRefinedLabel(
+              cur,
+              "Initials",
+              `Inherited split sibling 'Initials' slot from '${sibBase}'`
+            );
+            continue;
+          }
+        }
+      }
+
+      // 1b. Unlabeled field preceded only by a small toggle checkbox on the same row (e.g. [no odometer] or [______])
+      if (!cur.originalLabelText && leftSib && leftSib.type === "checkbox") {
+        const rowLeftPrompt = promptLabelsAfterUnderlines.find((l) => {
+          if (l.isHeaderLike || l.isInstructionLike || l.isSubCaption) return false;
+          const lmidY = (l.y0 + l.y1) / 2;
+          const rmidY = cur.rect.y + cur.rect.height / 2;
+          return l.x1 <= leftSib!.rect.x + 8 && Math.abs(lmidY - rmidY) <= 10.5;
+        });
+        if (rowLeftPrompt) {
+          applyRefinedLabel(
+            cur,
+            cleanSubCaptionLabel(rowLeftPrompt.text.replace(/[:]+$/, "").trim()),
+            `Associated row-left prompt '${rowLeftPrompt.text}' across toggle checkbox`
+          );
+          continue;
+        }
+      }
+    }
+
+    // 2. Stacked multi-line continuation grid (e.g. Postal address Line 2/3, Street address Line 2/3)
+    if (
+      !cur.originalLabelText &&
+      (cur.type === "char_cells" || cur.type === "text" || cur.type === "address")
+    ) {
+      let aboveNeighbor: DetectedFormField | null = null;
+      for (let k = i - 1; k >= 0; k--) {
+        const above = pageFields[k];
+        if (Math.abs(above.rect.x - cur.rect.x) > 8) continue;
+        const vGap = cur.rect.y - (above.rect.y + above.rect.height);
+        if (vGap >= -2 && vGap <= 10 && above.originalLabelText) {
+          aboveNeighbor = above;
+          break;
+        }
+      }
+      if (aboveNeighbor) {
+        const lineMatch = aboveNeighbor.originalLabelText.match(/^(.*?)\s*\(Line\s+(\d+)\)$/i);
+        const baseAnchorLabel = (lineMatch ? lineMatch[1] : aboveNeighbor.originalLabelText).trim();
+        const nextLineNum = lineMatch ? Number(lineMatch[2]) + 1 : 2;
+        applyRefinedLabel(
+          cur,
+          `${baseAnchorLabel} (Line ${nextLineNum})`,
+          `Inherited stacked multi-line continuation from '${baseAnchorLabel}'`
+        );
+      }
+    }
+  }
+
+  // 3. Prefix multi-column row groups with left-margin qualifier ("of counter official", "of data capturing official")
+  const underlineRowGroups: DetectedFormField[][] = [];
+  for (const f of pageFields) {
+    if (f.detectionSource !== "vector_underline" && f.type !== "signature" && f.type !== "date" && f.type !== "text") {
+      continue;
+    }
+    const existingRow = underlineRowGroups.find(
+      (g) => Math.abs(g[0].rect.y - f.rect.y) <= 6 && g[0].rect.x < f.rect.x
+    );
+    if (existingRow) existingRow.push(f);
+    else underlineRowGroups.push([f]);
+  }
+  for (const rowGrp of underlineRowGroups) {
+    if (rowGrp.length < 2) continue;
+    const minX = Math.min(...rowGrp.map((g) => g.rect.x));
+    const rowMidY =
+      rowGrp.reduce((s, g) => s + g.rect.y + g.rect.height / 2, 0) / rowGrp.length;
+    const leftContext = promptLabelsAfterUnderlines.find((l) => {
+      if (l.isHeaderLike || l.isInstructionLike || l.isSubCaption) return false;
+      const lmidY = (l.y0 + l.y1) / 2;
+      return l.x0 <= 60 && l.x1 <= minX + 4 && Math.abs(lmidY - rowMidY) <= 13;
+    });
+    if (leftContext) {
+      let ctxPrefix = cleanSubCaptionLabel(leftContext.text.replace(/[:]+$/, "").trim());
+      const ofMatch = ctxPrefix.match(/\bof\s+(.+)$/i);
+      if (ofMatch && ofMatch[1].trim().length >= 4) {
+        const rolePart = ofMatch[1].trim();
+        ctxPrefix = rolePart.charAt(0).toUpperCase() + rolePart.slice(1);
+      }
+      for (const item of rowGrp) {
+        if (
+          item.originalLabelText &&
+          !item.originalLabelText.toLowerCase().includes(ctxPrefix.toLowerCase())
+        ) {
+          applyRefinedLabel(
+            item,
+            `${ctxPrefix} - ${item.originalLabelText}`,
+            `Scoped multi-column row with left context '${ctxPrefix}'`,
+            Math.max(item.confidence, 0.9)
+          );
+        }
+      }
+    }
+  }
+
+  // Assign clean unique snake_case field names in final top-to-bottom reading order
+  for (const f of pageFields) {
+    if (!f.name) {
+      f.name = uniqueName(f.label);
+    }
+  }
 
   return pageFields;
 }

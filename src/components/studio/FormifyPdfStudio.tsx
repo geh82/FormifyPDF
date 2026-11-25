@@ -1014,11 +1014,39 @@ export function FormifyPdfStudio() {
               <div className="rounded-lg border border-slate-200 p-5 space-y-5">
                 {/* Step 1: Upload / Select PDF */}
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                     <span className="font-semibold text-slate-900">
                       01. Upload PDF Document
                     </span>
-                    <span className="text-slate-500">Digital, scanned, or multi-page · up to 35 MB</span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-500">Digital, scanned, or multi-page · up to 35 MB</span>
+                      <button
+                        type="button"
+                        disabled={!hasPermission("documents:write")}
+                        onClick={async () => {
+                          try {
+                            const res = await fetch(
+                              "/assets/aistudio/ALV-009-20260713-175634_e6028031.pdf"
+                            );
+                            if (!res.ok) throw new Error("Sample PDF unavailable");
+                            const blob = await res.blob();
+                            const sampleFile = new File(
+                              [blob],
+                              "ALV-009-20260713-175634.pdf",
+                              { type: "application/pdf" }
+                            );
+                            handleSelectPdfFile(sampleFile);
+                          } catch (err) {
+                            setUploadError(
+                              err instanceof Error ? err.message : "Unable to load sample PDF"
+                            );
+                          }
+                        }}
+                        className="text-emerald-900 hover:text-emerald-700 font-medium underline underline-offset-2 disabled:opacity-50"
+                      >
+                        Load Sample Form (ALV-009)
+                      </button>
+                    </div>
                   </div>
 
                   <label

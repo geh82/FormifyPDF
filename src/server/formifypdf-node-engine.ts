@@ -384,6 +384,10 @@ async function analyzePdfNode(
         } else if (fld instanceof PDFTextField) {
           if (fld.isMultiline()) ftype = "multiline";
           maxLen = fld.getMaxLength();
+        } else if (
+          fld.acroField.dict.lookupMaybe(PDFName.of("FT"), PDFName)?.asString() === "/Sig"
+        ) {
+          ftype = "signature";
         }
 
         existingOnPage.push({
@@ -395,13 +399,17 @@ async function analyzePdfNode(
         });
       }
 
+      const seenExistingNames = new Set(existingOnPage.map((e) => e.name));
       for (const sig of extractExistingSignatureWidgets(
         pdfDoc,
         pIdx,
         cropBox,
         rot
       )) {
-        existingOnPage.push(sig);
+        if (!seenExistingNames.has(sig.name)) {
+          existingOnPage.push(sig);
+          seenExistingNames.add(sig.name);
+        }
       }
 
       // Extract vector structural geometry + text + symbol glyphs via pdfjs-dist
@@ -593,6 +601,17 @@ async function generateAcroFormNode(payload: {
     x1: number,
     y1: number
   ) => {
+    const sw = Math.max(10, x1 - x0);
+    const sh = Math.max(8, y1 - y0);
+    const emptyApStream = pdfDoc.context.stream("", {
+      Type: "XObject",
+      Subtype: "Form",
+      BBox: [0, 0, sw, sh],
+      Matrix: [1, 0, 0, 1, 0, 0],
+      Resources: {},
+    });
+    const emptyApRef = pdfDoc.context.register(emptyApStream);
+
     const widgetDict = pdfDoc.context.obj({
       Type: "Annot",
       Subtype: "Widget",
@@ -602,11 +621,8 @@ async function generateAcroFormNode(payload: {
       Rect: [x0, y0, x1, y1],
       F: 4,
       P: page.ref,
-      BS: { W: 0.75, S: "S" },
-      MK: {
-        BG: [0.97, 0.99, 1.0],
-        BC: [0.45, 0.56, 0.72],
-      },
+      BS: { W: 0 },
+      AP: { N: emptyApRef },
     });
     const widgetRef = pdfDoc.context.register(widgetDict);
 
@@ -666,6 +682,12 @@ async function generateAcroFormNode(payload: {
       if (strategy === "comb") {
         usedNames.add(fieldName);
         const [x0, y0, x1, y1] = topLeftPdfToBottomLeftPdf(fld.rect, cropBox, rot);
+        const bw = Math.max(12, x1 - x0);
+        const bh = Math.max(8, y1 - y0);
+        const cellW = fld.charGridMeta?.cellWidthPt ?? bw / fld.cellRects.length;
+        const combFontSize = roundPt(
+          Math.min(10.5, Math.max(7.2, Math.min(bh * 0.68, cellW * 0.78)))
+        );
         const tf = form.createTextField(fieldName);
         setTooltip(tf, fld.label || fieldName);
         tf.setMaxLength(fld.cellRects.length);
@@ -676,9 +698,11 @@ async function generateAcroFormNode(payload: {
         tf.addToPage(page, {
           x: x0,
           y: y0,
-          width: Math.max(12, x1 - x0),
-          height: Math.max(8, y1 - y0),
+          width: bw,
+          height: bh,
+          borderWidth: 0,
         });
+        tf.setFontSize(combFontSize);
         createdWidgets++;
       } else {
         for (let ci = 0; ci < fld.cellRects.length; ci++) {
@@ -687,6 +711,11 @@ async function generateAcroFormNode(payload: {
           usedNames.add(cname);
           const cr = fld.cellRects[ci];
           const [cx0, cy0, cx1, cy1] = topLeftPdfToBottomLeftPdf(cr, cropBox, rot);
+          const cw = Math.max(6, cx1 - cx0);
+          const ch = Math.max(6, cy1 - cy0);
+          const cellFontSize = roundPt(
+            Math.min(10.5, Math.max(7.2, Math.min(ch * 0.68, cw * 0.78)))
+          );
           const tf = form.createTextField(cname);
           setTooltip(tf, `${fld.label || fieldName} (${ci + 1}/${fld.cellRects.length})`);
           tf.setMaxLength(1);
@@ -696,9 +725,11 @@ async function generateAcroFormNode(payload: {
           tf.addToPage(page, {
             x: cx0,
             y: cy0,
-            width: Math.max(6, cx1 - cx0),
-            height: Math.max(6, cy1 - cy0),
+            width: cw,
+            height: ch,
+            borderWidth: 0,
           });
+          tf.setFontSize(cellFontSize);
           createdWidgets++;
         }
       }
@@ -713,7 +744,7 @@ async function generateAcroFormNode(payload: {
     if (fld.type === "checkbox") {
       const cb = form.createCheckBox(fieldName);
       setTooltip(cb, fld.label || fieldName);
-      cb.addToPage(page, { x: x0, y: y0, width: w, height: h });
+      cb.addToPage(page, { x: x0, y: y0, width: w, height: h, borderWidth: 0 });
       if (isTruthyCheckValue(fld.defaultValue)) cb.check();
       createdWidgets++;
     } else if (fld.type === "signature") {
@@ -735,7 +766,8 @@ async function generateAcroFormNode(payload: {
       if (fld.defaultValue && opts.includes(fld.defaultValue)) {
         dd.select(fld.defaultValue);
       }
-      dd.addToPage(page, { x: x0, y: y0, width: w, height: h });
+      dd.addToPage(page, { x: x0, y: y0, width: w, height: h, borderWidth: 0 });
+      dd.setFontSize(roundPt(Math.min(10.5, Math.max(7.5, h * 0.66))));
       createdWidgets++;
     } else if (fld.type === "listbox") {
       const ol = form.createOptionList(fieldName);
@@ -745,7 +777,8 @@ async function generateAcroFormNode(payload: {
       if (fld.defaultValue && opts.includes(fld.defaultValue)) {
         ol.select(fld.defaultValue);
       }
-      ol.addToPage(page, { x: x0, y: y0, width: w, height: h });
+      ol.addToPage(page, { x: x0, y: y0, width: w, height: h, borderWidth: 0 });
+      ol.setFontSize(roundPt(Math.min(10.0, Math.max(7.5, h * 0.25))));
       createdWidgets++;
     } else if (fld.type === "radio") {
       const rg = form.createRadioGroup(fieldName);
@@ -770,6 +803,7 @@ async function generateAcroFormNode(payload: {
           y: oy0,
           width: Math.max(8, ox1 - ox0),
           height: Math.max(8, oy1 - oy0),
+          borderWidth: 0,
         });
       });
       if (fld.defaultValue && opts.includes(fld.defaultValue)) {
@@ -788,7 +822,12 @@ async function generateAcroFormNode(payload: {
       if (fld.defaultValue) {
         tf.setText(toWinAnsiSafeText(fld.defaultValue));
       }
-      tf.addToPage(page, { x: x0, y: y0, width: w, height: h });
+      tf.addToPage(page, { x: x0, y: y0, width: w, height: h, borderWidth: 0 });
+      if (fld.multiline || fld.type === "multiline") {
+        tf.setFontSize(9.5);
+      } else {
+        tf.setFontSize(roundPt(Math.min(10.5, Math.max(7.5, h * 0.66))));
+      }
       createdWidgets++;
     }
   }
@@ -796,12 +835,20 @@ async function generateAcroFormNode(payload: {
   if (!form.acroForm.dict.has(PDFName.of("Fields"))) {
     form.acroForm.dict.set(PDFName.of("Fields"), pdfDoc.context.obj([]));
   }
+
+  // Strip opaque white /MK BG and black /MK BC from all widgets BEFORE generating text appearances
+  // so underlying printed grid lines, borders, and choice text remain 100% visible.
+  stripOpaqueWidgetBackgrounds(pdfDoc, form);
+
   try {
     const helv = await pdfDoc.embedFont(StandardFonts.Helvetica);
     form.updateFieldAppearances(helv);
   } catch {
     // Non-fatal fallback if any custom widget lacks default appearance formatting
   }
+
+  // Replace pdf-lib's hardcoded opaque white checkbox/radio /AP /N streams with transparent vector /AP /N streams
+  applyTransparentControlAppearances(pdfDoc, form);
 
   fs.mkdirSync(path.dirname(payload.outputPdfPath), { recursive: true });
   const outBytes = await pdfDoc.save({ useObjectStreams: false });
@@ -818,6 +865,132 @@ async function generateAcroFormNode(payload: {
     sanitizedActions: false,
     validation,
   };
+}
+
+/**
+ * Strip opaque white background (/BG) and border color (/BC) from /MK dictionaries on every widget,
+ * and zero /BS width so printed form artwork underneath shows cleanly through interactive widgets.
+ */
+function stripOpaqueWidgetBackgrounds(
+  pdfDoc: PDFDocument,
+  form: ReturnType<PDFDocument["getForm"]>
+): void {
+  for (const field of form.getFields()) {
+    for (const widget of field.acroField.getWidgets()) {
+      const mk = widget.dict.lookupMaybe(PDFName.of("MK"), PDFDict);
+      if (mk) {
+        mk.delete(PDFName.of("BG"));
+        mk.delete(PDFName.of("BC"));
+      }
+      widget.dict.set(PDFName.of("BS"), pdfDoc.context.obj({ W: 0 }));
+    }
+  }
+}
+
+/**
+ * Build completely transparent Normal (/N) Form XObject appearance streams for CheckBox and RadioGroup
+ * widgets so that:
+ * - Off state draws nothing (preserving underlying printed borders and bilingual option labels at 100% clarity)
+ * - On state draws a crisp dark-ink / navy selection 'X' (and perimeter highlight for wide text-labeled option boxes)
+ *   without painting an opaque white background over underlying printed text.
+ */
+function applyTransparentControlAppearances(
+  pdfDoc: PDFDocument,
+  form: ReturnType<PDFDocument["getForm"]>
+): void {
+  const makeFormXObj = (ops: string, w: number, h: number) => {
+    const stream = pdfDoc.context.stream(ops, {
+      Type: "XObject",
+      Subtype: "Form",
+      BBox: [0, 0, roundPt(w), roundPt(h)],
+      Matrix: [1, 0, 0, 1, 0, 0],
+      Resources: {},
+    });
+    return pdfDoc.context.register(stream);
+  };
+
+  for (const field of form.getFields()) {
+    if (!(field instanceof PDFCheckBox) && !(field instanceof PDFRadioGroup)) {
+      continue;
+    }
+
+    const widgets = field.acroField.getWidgets();
+    for (const widget of widgets) {
+      const mk = widget.dict.lookupMaybe(PDFName.of("MK"), PDFDict);
+      if (mk) {
+        mk.delete(PDFName.of("BG"));
+        mk.delete(PDFName.of("BC"));
+      }
+      widget.dict.set(PDFName.of("BS"), pdfDoc.context.obj({ W: 0 }));
+
+      const rect = widget.getRectangle();
+      const w = Math.max(8, rect.width);
+      const h = Math.max(8, rect.height);
+
+      // Determine the exact On-state PDFName already assigned in /AP /N (fallback to 'Yes')
+      let onStateName = PDFName.of("Yes");
+      const existingAp = widget.dict.lookupMaybe(PDFName.of("AP"), PDFDict);
+      const existingN = existingAp?.lookupMaybe(PDFName.of("N"), PDFDict);
+      if (existingN) {
+        for (const [k] of existingN.entries()) {
+          if (k !== PDFName.of("Off")) {
+            onStateName = k;
+            break;
+          }
+        }
+      }
+
+      const offRef = makeFormXObj("", w, h);
+
+      let onOps: string;
+      if (w > 24) {
+        // Wide bordered text option box (e.g. [ RSA ID ], [ owner ], [ no odometer ]):
+        // Transparent inset blue highlight border + crisp top-right 'X' mark tucked into clear corner margin.
+        const pad = 1.2;
+        const x1 = roundPt(w - pad * 2);
+        const y1 = roundPt(h - pad * 2);
+        const isNarrowOption = w <= 50;
+        const markSize = isNarrowOption ? 4.2 : 7.5;
+        const markInsetRight = isNarrowOption ? 2.4 : 3.0;
+        const markInsetTop = isNarrowOption ? 2.4 : 2.5;
+        const mx1 = roundPt(w - markInsetRight);
+        const mx0 = roundPt(mx1 - markSize);
+        const my1 = roundPt(h - markInsetTop);
+        const my0 = roundPt(Math.max(2.5, my1 - markSize));
+        const markStroke = isNarrowOption ? "1.15 w" : "1.5 w";
+        onOps = [
+          "q",
+          "0.06 0.24 0.62 RG",
+          "1.3 w",
+          `${pad} ${pad} ${x1} ${y1} re S`,
+          markStroke,
+          `${mx0} ${my0} m ${mx1} ${my1} l ${mx0} ${my1} m ${mx1} ${my0} l S`,
+          "Q",
+        ].join("\n");
+      } else {
+        // Compact square checkbox / radio circle: centered 'X' with transparent background
+        const p = roundPt(Math.min(3.0, w * 0.2));
+        const rx = roundPt(w - p);
+        const ty = roundPt(h - p);
+        onOps = [
+          "q",
+          "0.06 0.14 0.36 RG",
+          "1.4 w",
+          `${p} ${p} m ${rx} ${ty} l ${p} ${ty} m ${rx} ${p} l S`,
+          "Q",
+        ].join("\n");
+      }
+
+      const onRef = makeFormXObj(onOps, w, h);
+      const apNormal = pdfDoc.context.obj({});
+      apNormal.set(onStateName, onRef);
+      apNormal.set(PDFName.of("Off"), offRef);
+
+      const apDict = pdfDoc.context.obj({});
+      apDict.set(PDFName.of("N"), apNormal);
+      widget.dict.set(PDFName.of("AP"), apDict);
+    }
+  }
 }
 
 function flattenRenderValues(
@@ -919,13 +1092,34 @@ async function renderPdfNode(payload: {
         }
         populatedWidgets++;
         continue;
-      } else if (acField instanceof PDFDropdown || acField instanceof PDFOptionList) {
-        acField.select(String(rawVal));
-        populatedWidgets++;
-        continue;
-      } else if (acField instanceof PDFRadioGroup) {
-        acField.select(String(rawVal));
-        populatedWidgets++;
+      } else if (
+        acField instanceof PDFDropdown ||
+        acField instanceof PDFOptionList ||
+        acField instanceof PDFRadioGroup
+      ) {
+        const desired = String(rawVal).trim();
+        const availableOpts = acField.getOptions();
+        const normOpt = (v: string) =>
+          v
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "_")
+            .replace(/^_+|_+$/g, "");
+        const desiredNorm = normOpt(desired);
+        const matchedOpt =
+          availableOpts.find((o) => o === desired) ??
+          availableOpts.find((o) => o.toLowerCase() === desired.toLowerCase()) ??
+          (desiredNorm
+            ? availableOpts.find((o) => normOpt(o) === desiredNorm) ??
+              availableOpts.find(
+                (o) =>
+                  normOpt(o).startsWith(desiredNorm) ||
+                  desiredNorm.startsWith(normOpt(o))
+              )
+            : undefined);
+        if (matchedOpt) {
+          acField.select(matchedOpt);
+          populatedWidgets++;
+        }
         continue;
       }
     }
@@ -1048,6 +1242,22 @@ async function renderPdfNode(payload: {
     }
   }
 
+  stripOpaqueWidgetBackgrounds(pdfDoc, form);
+  for (const field of form.getFields()) {
+    if (
+      field instanceof PDFTextField ||
+      field instanceof PDFDropdown ||
+      field instanceof PDFOptionList
+    ) {
+      try {
+        field.defaultUpdateAppearances(font);
+      } catch {
+        // Ignore appearance update edge cases
+      }
+    }
+  }
+  applyTransparentControlAppearances(pdfDoc, form);
+
   const shouldFlatten = payload.flatten !== false;
   if (shouldFlatten && form.getFields().length > 0) {
     try {
@@ -1118,14 +1328,15 @@ async function validateAcroFormNode(
     }
   }
 
-  // Include /FT /Sig annotations
+  // Include standalone /FT /Sig annotations not already listed in form.getFields()
   for (let pIdx = 0; pIdx < pages.length; pIdx++) {
     const page = pages[pIdx];
     const crop = page.getCropBox();
     const rot = normalizeRotation(page.getRotation().angle);
     for (const sig of extractExistingSignatureWidgets(pdfDoc, pIdx, crop, rot)) {
+      if (nameCounts.has(sig.name)) continue;
       widgetCount++;
-      nameCounts.set(sig.name, (nameCounts.get(sig.name) || 0) + 1);
+      nameCounts.set(sig.name, 1);
       extractedWidgets.push({
         name: sig.name,
         page: pIdx,
