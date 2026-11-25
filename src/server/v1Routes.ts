@@ -3275,5 +3275,162 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     }
   );
 
+  //
+// -------------------------------------------------------------------------
+// ADMIN ROUTE GROUP — Protected by requireAuth + administrator role
+// -------------------------------------------------------------------------
+//
+  router.get("/admin", requireAuth, requirePermission("settings:manage"), (req: AuthedRequest, res) => {
+    const db = getDatabase();
+    const tid = req.principal!.tenantId;
+
+    // Feature toggle states
+    const togglesRow = db
+      .prepare(
+        "SELECT top_tier_zip_upload, top_tier_zip_download, normal_upload, normal_download FROM tenants WHERE id = ?"
+      )
+      .get(tid) as {
+        top_tier_zip_upload: number;
+        top_tier_zip_download: number;
+        normal_upload: number;
+        normal_download: number;
+      };
+
+    // Pricing tiers
+    const tiers = db
+      .prepare("SELECT * FROM pricing_tiers WHERE tenant_id = ? ORDER BY max_pages ASC")
+      .all(tid) as Array<{
+        id: string;
+        name: string;
+        max_pages: number;
+        price_cents: number;
+        description: string;
+        is_active: number;
+        created_at: string;
+      }>;
+
+    res.json({
+      ok: true,
+      tenantId: tid,
+      toggles: {
+        topTierZipUpload: togglesRow?.top_tier_zip_upload === 1,
+        topTierZipDownload: togglesRow?.top_tier_zip_download === 1,
+        normalUpload: togglesRow?.normal_upload === 1,
+        normalDownload: togglesRow?.normal_download === 1,
+      },
+      pricingTiers: tiers,
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Feature Toggle Management
+  // -------------------------------------------------------------------------
+  router.post(
+    "/admin/toggles",
+    requireAuth,
+    requirePermission("settings:manage"),
+    (req: AuthedRequest, res) => {
+      const db = getDatabase();
+      const tid = req.principal!.tenantId;
+      const {
+        topTierZipUpload,
+        topTierZipDownload,
+        normalUpload,
+        normalDownload,
+      } = req.body;
+
+      db.prepare(
+        "UPDATE tenants SET top_tier_zip_upload = ?, top_tier_zip_download = ?, normal_upload = ?, normal_download = ? WHERE id = ?"
+      ).run(
+        topTierZipUpload ? 1 : 0,
+        topTierZipDownload ? 1 : 0,
+        normalUpload ? 1 : 0,
+        normalDownload ? 1 : 0,
+        tid
+      );
+
+      res.json({ ok: true });
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Pricing Tier CRUD
+  // -------------------------------------------------------------------------
+  router.post(
+    "/admin/pricing-tiers",
+    requireAuth,
+    requirePermission("settings:manage"),
+    (req: AuthedRequest, res) => {
+      const db = getDatabase();
+      const tid = req.principal!.tenantId;
+      const { name, maxPages, priceCents, description } = req.body;
+      const id = `tier_${maxPages}_${priceCents}`;
+
+      db.prepare(
+        "INSERT OR REPLACE INTO pricing_tiers (id, tenant_id, name, max_pages, price_cents, description, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)"
+      ).run(id, tid, name, maxPages, priceCents, description || '');
+
+      res.json({ ok: true });
+    }
+  );
+
+  router.patch(
+    "/admin/pricing-tiers/:id",
+    requireAuth,
+    requirePermission("settings:manage"),
+    (req: AuthedRequest, res) => {
+      const db = getDatabase();
+      const tid = req.principal!.tenantId;
+      const { name, priceCents, description, isActive } = req.body;
+      const tierId = req.params.id;
+
+      const updates: string[] = [];
+      const values: any[] = [];
+
+      if (name !== undefined) {
+        updates.push("name = ?");
+        values.push(name);
+      }
+      if (priceCents !== undefined) {
+        updates.push("price_cents = ?");
+        values.push(priceCents);
+      }
+      if (description !== undefined) {
+        updates.push("description = ?");
+        values.push(description);
+      }
+      if (isActive !== undefined) {
+        updates.push("is_active = ?");
+        values.push(isActive ? 1 : 0);
+      }
+
+      values.push(tierId);
+      values.push(tid);
+
+      if (updates.length > 0) {
+        const sql = `UPDATE pricing_tiers SET ${updates.join(", ")} WHERE id = ? AND tenant_id = ?`;
+        db.prepare(sql).run(...values);
+      }
+
+      res.json({ ok: true });
+    }
+  );
+
+  router.delete(
+    "/admin/pricing-tiers/:id",
+    requireAuth,
+    requirePermission("settings:manage"),
+    (req: AuthedRequest, res) => {
+      const db = getDatabase();
+      const tid = req.principal!.tenantId;
+      const tierId = req.params.id;
+
+      db.prepare("DELETE FROM pricing_tiers WHERE id = ? AND tenant_id = ?").run(tierId, tid);
+
+      res.json({ ok: true });
+    }
+  );
+
   return router;
 }
+

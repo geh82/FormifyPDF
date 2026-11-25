@@ -221,6 +221,7 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     expect(migrations.map((m) => m.version)).toEqual([
       "001_init.sql",
       "002_supporting_documents.sql",
+      "003_feature_toggles_and_pricing.sql",
     ]);
     // Re-opening cache must preserve existing data without destructive reset
     resetDatabaseCache();
@@ -231,6 +232,7 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     expect(migrationsAfter.map((m) => m.version)).toEqual([
       "001_init.sql",
       "002_supporting_documents.sql",
+      "003_feature_toggles_and_pricing.sql",
     ]);
   });
 

@@ -896,8 +896,10 @@ async function generateAcroFormNode(payload: {
     // Non-fatal fallback if any custom widget lacks default appearance formatting
   }
 
-  // Replace/augment /AP /N streams with persistent translucent dim highlight tint across ALL widgets
-  applyDimHighlightAppearances(pdfDoc, form, helvFont);
+  // Note: applyDimHighlightAppearances is intentionally omitted per task requirement
+  // to remove the persistent translucent dim highlights that obscure underlying form artwork.
+  // Fields will render with their native /AP appearances (or default pdf-lib rendering)
+  // without the overlay dim highlight tint.
   form.acroForm.dict.set(PDFName.of("NeedAppearances"), pdfDoc.context.obj(false));
 
   fs.mkdirSync(path.dirname(payload.outputPdfPath), { recursive: true });

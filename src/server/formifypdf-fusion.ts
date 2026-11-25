@@ -683,6 +683,7 @@ export function clusterCharCells(
 
   // Identify vertically repeating small box columns (e.g. Pass/Fail checklist columns with >=3 aligned rows),
   // strictly excluding boxes that are part of horizontal >=3-cell character combs so multi-cell combs don't pollute column counts.
+  // Expanded tolerance to capture more char cell columns even with slight spacing variations
   const repeatingSmallCols: Array<{ x0: number; x1: number; count: number }> = [];
   for (const sb of sorted) {
     const sw = sb.x1 - sb.x0;
@@ -691,19 +692,19 @@ export function clusterCharCells(
     const sameRowNeighbors = sorted.filter(
       (other) =>
         other !== sb &&
-        Math.abs(other.y0 - sb.y0) <= 3.5 &&
-        Math.abs((other.y1 - other.y0) - sh) <= 3.0 &&
-        Math.min(Math.abs(other.x0 - sb.x1), Math.abs(sb.x0 - other.x1)) <= 2.5
+        Math.abs(other.y0 - sb.y0) <= 5.0 &&
+        Math.abs((other.y1 - other.y0) - sh) <= 5.0 &&
+        Math.min(Math.abs(other.x0 - sb.x1), Math.abs(sb.x0 - other.x1)) <= 7.0
     );
     if (sameRowNeighbors.length >= 2) continue;
     const rowRunCount = sorted.filter(
       (other) =>
-        Math.abs(other.y0 - sb.y0) <= 3.5 &&
-        other.x0 >= sb.x0 - 45 &&
-        other.x1 <= sb.x1 + 45 &&
-        other.x1 - other.x0 <= 24
+        Math.abs(other.y0 - sb.y0) <= 5.5 &&
+        other.x0 >= sb.x0 - 55 &&
+        other.x1 <= sb.x1 + 55 &&
+        other.x1 - other.x0 <= 30
     ).length;
-    if (rowRunCount >= 3) continue;
+    if (rowRunCount >= 4) continue;
     const existingCol = repeatingSmallCols.find(
       (c) => Math.abs(c.x0 - sb.x0) <= 2.5 && Math.abs(c.x1 - sb.x1) <= 2.5
     );
@@ -737,11 +738,11 @@ export function clusterCharCells(
 
       const maxAllowedGap = div.isDateSeparator ? 10.5 : 8.5;
       if (
-        Math.abs(cand.y0 - base.y0) <= 4.0 &&
-        Math.abs(ch - bh) <= 4.0 &&
-        Math.abs(cw - bw) <= 6.0 &&
-        gap >= -2.5 &&
-        gap <= maxAllowedGap &&
+        Math.abs(cand.y0 - base.y0) <= 6.0 &&
+        Math.abs(ch - bh) <= 6.0 &&
+        Math.abs(cw - bw) <= 8.0 &&
+        gap >= -3.5 &&
+        gap <= maxAllowedGap + 2.0 &&
         !div.hasWordDivider
       ) {
         row.push(cand);

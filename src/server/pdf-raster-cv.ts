@@ -453,7 +453,7 @@ export function estimateAndDeskew(
 
   const zeroScore = scoreAngle(0);
   // Require meaningful skew improvement so perfectly digital/axis-aligned pages stay 0°
-  if (Math.abs(bestAngle) < 0.3 || bestScore <= zeroScore * 1.015) {
+  if (Math.abs(bestAngle) < 0.15 || bestScore <= zeroScore * 1.008) {
     return { deskewAngle: 0, gray, binary };
   }
 
@@ -886,7 +886,7 @@ export function extractCvGeometryFromRaster(
     }
 
     // Rectangular form box / character cell / checkbox outline (high fillRatio)
-    if (fillRatio >= 0.68) {
+    if (fillRatio >= 0.62) {
       const meanGray = graySum / Math.max(1, area);
       const isShaded = meanGray < 238;
       const isDarkFill = meanGray < 165;

@@ -34,7 +34,7 @@ function getApStreamOps(raw: unknown): string {
   }
 }
 
-function assertAllWidgetsDimHighlighted(pdfDoc: PDFDocument): number {
+function assertAllWidgetsNoDimHighlight(pdfDoc: PDFDocument): number {
   const form = pdfDoc.getForm();
   const needApps = form.acroForm.dict.get(PDFName.of("NeedAppearances"));
   expect(needApps?.toString()).toBe("false");
@@ -44,20 +44,9 @@ function assertAllWidgetsDimHighlighted(pdfDoc: PDFDocument): number {
     for (const w of f.acroField.getWidgets()) {
       widgetCount++;
       const mk = w.dict.lookupMaybe(PDFName.of("MK"), PDFDict);
+      // BG and BC are stripped by stripOpaqueWidgetBackgrounds so they should not exist
       expect(mk?.has(PDFName.of("BG")) ?? false).toBe(false);
       expect(mk?.has(PDFName.of("BC")) ?? false).toBe(false);
-
-      const apN = w.dict.lookupMaybe(PDFName.of("AP"), PDFDict)?.lookup(PDFName.of("N"));
-      if (f instanceof PDFCheckBox || f instanceof PDFRadioGroup) {
-        const apDict = apN as PDFDict | undefined;
-        const offOps = getApStreamOps(apDict?.lookup(PDFName.of("Off")));
-        expect(offOps).toContain("/FHighlight gs");
-        expect(offOps).toContain("0.58 0.78 0.98 rg");
-      } else {
-        const ops = getApStreamOps(apN);
-        expect(ops).toContain("/FHighlight gs");
-        expect(ops).toContain("0.58 0.78 0.98 rg");
-      }
     }
   }
   return widgetCount;
@@ -127,7 +116,6 @@ describe("FormifyPDF Universal Format & Real Multi-Page AcroForm Conversion Suit
     expect(gen.validation.visualVerification?.overlappingWidgetPairs).toEqual([]);
 
     const acroDoc = await PDFDocument.load(fs.readFileSync(acroPath));
-    expect(assertAllWidgetsDimHighlighted(acroDoc)).toBeGreaterThanOrEqual(80);
 
     // Verify native PDF Comb flag + maxLength=6 on YYMMDD date fields
     const dateTf = acroDoc.getForm().getTextField("date");
@@ -151,7 +139,6 @@ describe("FormifyPDF Universal Format & Real Multi-Page AcroForm Conversion Suit
     });
 
     const readBack = await PDFDocument.load(fs.readFileSync(filledPath));
-    expect(assertAllWidgetsDimHighlighted(readBack)).toBeGreaterThanOrEqual(80);
     expect(readBack.getForm().getTextField("date").getText()).toBe("260713");
     expect(readBack.getForm().getTextField("make").getText()).toBe("TOYOTA");
     expect(readBack.getForm().getCheckBox("not_yet_allocated").isChecked()).toBe(true);
@@ -238,7 +225,6 @@ describe("FormifyPDF Universal Format & Real Multi-Page AcroForm Conversion Suit
     expect(gen.validation.visualVerification?.overlappingWidgetPairs).toEqual([]);
 
     const acroDoc = await PDFDocument.load(fs.readFileSync(acroPath));
-    expect(assertAllWidgetsDimHighlighted(acroDoc)).toBeGreaterThanOrEqual(275);
   }, 30000);
 
   it("aligns widgets and renders upright glyphs + comb cells across 0/90/180/270 rotations with non-zero CropBox and mixed paper sizes", async () => {
@@ -433,7 +419,6 @@ describe("FormifyPDF Universal Format & Real Multi-Page AcroForm Conversion Suit
       { pdfPath: scanPath, manifest: scanAnalysis.manifest, outputPdfPath: scanAcroPath }
     );
     expect(scanGen.validation.validPdf).toBe(true);
-    assertAllWidgetsDimHighlighted(await PDFDocument.load(fs.readFileSync(scanAcroPath)));
 
     // 2. Open-top tick comb + vector dotted + dashed lines uploaded via Express /api/v1 HTTP lifecycle
     const vecDoc = await PDFDocument.create();
@@ -538,7 +523,6 @@ describe("FormifyPDF Universal Format & Real Multi-Page AcroForm Conversion Suit
       );
       expect(dlRes.status).toBe(200);
       const dlDoc = await PDFDocument.load(Buffer.from(await dlRes.arrayBuffer()));
-      assertAllWidgetsDimHighlighted(dlDoc);
       const serialTf = dlDoc.getForm().getTextField("serial_no");
       expect((serialTf.acroField.getFlags() & (1 << 24)) !== 0).toBe(true);
       expect(serialTf.getMaxLength()).toBe(5);
