@@ -3280,6 +3280,29 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
 // ADMIN ROUTE GROUP — Protected by requireAuth + administrator role
 // -------------------------------------------------------------------------
 //
+  
+  function getTenantFeatureToggles(db: ReturnType<typeof getDatabase>, tenantId: string) {
+    const row = db
+      .prepare(
+        "SELECT top_tier_zip_upload, top_tier_zip_download, normal_upload, normal_download FROM tenants WHERE id = ?"
+      )
+      .get(tenantId) as
+      | {
+          top_tier_zip_upload: number;
+          top_tier_zip_download: number;
+          normal_upload: number;
+          normal_download: number;
+        }
+      | undefined;
+
+    return {
+      topTierZipUpload: (row?.top_tier_zip_upload ?? 1) === 1,
+      topTierZipDownload: (row?.top_tier_zip_download ?? 1) === 1,
+      normalUpload: (row?.normal_upload ?? 1) === 1,
+      normalDownload: (row?.normal_download ?? 1) === 1,
+    };
+  }
+
   router.get("/admin", requireAuth, requirePermission("settings:manage"), (req: AuthedRequest, res) => {
     const db = getDatabase();
     const tid = req.principal!.tenantId;
@@ -3364,6 +3387,9 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       const db = getDatabase();
       const tid = req.principal!.tenantId;
       const { name, maxPages, priceCents, description } = req.body;
+      if (!name || typeof name !== "string" || Number(maxPages) <= 0 || Number(priceCents) < 0 || Number.isNaN(Number(maxPages)) || Number.isNaN(Number(priceCents))) {
+        return res.status(400).json({ ok: false, error: "Invalid pricing tier fields." });
+      }
       const id = `tier_${maxPages}_${priceCents}`;
 
       db.prepare(

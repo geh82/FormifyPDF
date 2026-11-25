@@ -219,3 +219,26 @@ export type {
   DocumentPageInfo,
   FieldManifest,
 };
+
+export interface PricingTierRecord {
+  id: string;
+  tenant_id?: string;
+  name: string;
+  max_pages: number;
+  price_cents: number;
+  description: string;
+  is_active: number;
+  created_at?: string;
+}
+
+export function matchPricingTierForPages(
+  pageCount: number,
+  tiers: PricingTierRecord[]
+): PricingTierRecord | null {
+  const activeSorted = tiers
+    .filter((t) => Number(t.is_active) === 1 && Number(t.max_pages) > 0)
+    .sort((a, b) => Number(a.max_pages) - Number(b.max_pages));
+  if (activeSorted.length === 0) return null;
+  const safePages = Math.max(1, pageCount);
+  return activeSorted.find((t) => safePages <= Number(t.max_pages)) ?? activeSorted[activeSorted.length - 1];
+}
