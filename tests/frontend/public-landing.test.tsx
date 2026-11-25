@@ -56,11 +56,27 @@ describe("Public Landing Conversion Experience (/)", () => {
                 is_active: 1,
               },
               {
-                id: "tier_30_499",
+                id: "tier_30_599",
                 name: "Up to 30 pages",
                 max_pages: 30,
-                price_cents: 499,
+                price_cents: 599,
                 description: "Up to 30 pages",
+                is_active: 1,
+              },
+              {
+                id: "tier_45_749",
+                name: "Up to 45 pages",
+                max_pages: 45,
+                price_cents: 749,
+                description: "Up to 45 pages",
+                is_active: 1,
+              },
+              {
+                id: "tier_60_999",
+                name: "Up to 60 pages",
+                max_pages: 60,
+                price_cents: 999,
+                description: "Up to 60 pages",
                 is_active: 1,
               },
             ],
@@ -80,11 +96,41 @@ describe("Public Landing Conversion Experience (/)", () => {
     expect(text).toContain("Up to 15 pages");
     expect(text).toContain("$2.99");
     expect(text).toContain("Up to 30 pages");
-    expect(text).toContain("$4.99");
+    expect(text).toContain("$5.99");
+    expect(text).toContain("Up to 45 pages");
+    expect(text).toContain("$7.49");
+    expect(text).toContain("Up to 60 pages");
+    expect(text).toContain("$9.99");
+    expect(text).toContain("Above 60 Pages");
+    expect(text).toContain("Custom Price");
+    expect(text).toContain("Bulk, Business & Recurring Conversions");
 
     // Required upload controls with exact labels
     expect(findButtonByExactText(container, "Upload")).toBeTruthy();
     expect(findButtonByExactText(container, "ZIP Upload")).toBeTruthy();
+
+    // Commercial footer, formifypdf.com domain, and social media links
+    const footer = container.querySelector("footer");
+    expect(footer).toBeTruthy();
+    expect(footer?.textContent).toContain("formifypdf.com");
+    expect(footer?.textContent).toContain("support@formifypdf.com");
+    expect(footer?.querySelector('a[aria-label="FormifyPDF on X"]')).toBeTruthy();
+    expect(footer?.querySelector('a[aria-label="FormifyPDF on LinkedIn"]')).toBeTruthy();
+    expect(footer?.querySelector('a[aria-label="FormifyPDF on GitHub"]')).toBeTruthy();
+    expect(footer?.querySelector('a[aria-label="FormifyPDF on YouTube"]')).toBeTruthy();
+
+    // Verify policy modal opens from footer link
+    const privacyBtn = findButtonByExactText(container, "Privacy Policy");
+    expect(privacyBtn).toBeTruthy();
+    await act(async () => {
+      privacyBtn?.click();
+    });
+    expect(container.querySelector('[role="dialog"]')?.textContent).toContain("Privacy Policy");
+    const closeModalBtn = findButtonByExactText(container, "Close");
+    await act(async () => {
+      closeModalBtn?.click();
+    });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
 
     // Forbidden strings and hidden /admin checks
     expect(text).not.toContain("Normal Upload");
@@ -113,15 +159,34 @@ describe("Public Landing Conversion Experience (/)", () => {
         is_active: 1,
       },
       {
-        id: "tier_30_499",
+        id: "tier_30_599",
         name: "Up to 30 pages",
         max_pages: 30,
-        price_cents: 499,
+        price_cents: 599,
         description: "Up to 30 pages",
         is_active: 1,
       },
+      {
+        id: "tier_45_749",
+        name: "Up to 45 pages",
+        max_pages: 45,
+        price_cents: 749,
+        description: "Up to 45 pages",
+        is_active: 1,
+      },
+      {
+        id: "tier_60_999",
+        name: "Up to 60 pages",
+        max_pages: 60,
+        price_cents: 999,
+        description: "Up to 60 pages",
+        is_active: 1,
+      },
     ];
-    expect(matchPricingTierForPages(20, tiers)?.id).toBe("tier_30_499");
+    expect(matchPricingTierForPages(20, tiers)?.id).toBe("tier_30_599");
+    expect(matchPricingTierForPages(40, tiers)?.id).toBe("tier_45_749");
+    expect(matchPricingTierForPages(55, tiers)?.id).toBe("tier_60_999");
+    expect(matchPricingTierForPages(65, tiers)).toBeNull();
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -158,9 +223,9 @@ describe("Public Landing Conversion Experience (/)", () => {
               widgetCount: 14,
               acroformByteSize: 98304,
               paid: paidState,
-              paidTierId: paidState ? "tier_30_499" : null,
+              paidTierId: paidState ? "tier_30_599" : null,
               paidTierName: paidState ? "Up to 30 pages" : null,
-              paidAmountCents: paidState ? 499 : null,
+              paidAmountCents: paidState ? 599 : null,
               job: {
                 id: "job_20p",
                 stage: "completed",
@@ -285,7 +350,7 @@ describe("Public Landing Conversion Experience (/)", () => {
       expect(container.textContent).toContain("20 pages");
       expect(container.textContent).toContain("14 fields · 14 widgets");
       expect(container.textContent).toContain("Up to 30 pages");
-      expect(container.textContent).toContain("$4.99");
+      expect(container.textContent).toContain("$5.99");
 
       const dlBtnLocked = findButtonByExactText(container, "Download");
       const zipDlBtnLocked = findButtonByExactText(container, "ZIP Download");
@@ -294,7 +359,7 @@ describe("Public Landing Conversion Experience (/)", () => {
 
       // Click pay-to-unlock CTA
       const payBtn = Array.from(container.querySelectorAll("button")).find((b) =>
-        b.textContent?.includes("Pay $4.99 to Unlock Downloads")
+        b.textContent?.includes("Pay $5.99 to Unlock Downloads")
       );
       expect(payBtn).toBeTruthy();
 

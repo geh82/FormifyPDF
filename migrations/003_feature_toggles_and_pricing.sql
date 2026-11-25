@@ -26,5 +26,7 @@ VALUES ('tenant_default', 'Default Tenant', 'default', 30);
 
 -- Insert default pricing tiers for the default tenant
 INSERT OR IGNORE INTO pricing_tiers (id, tenant_id, name, max_pages, price_cents, description, is_active) VALUES
-  ('tier_15_299', 'tenant_default', 'Up to 15 pages', 15, 299, 'Up to 15 pages — .99', 1),
-  ('tier_30_499', 'tenant_default', 'Up to 30 pages', 30, 499, 'Up to 30 pages — .99', 1);
+  ('tier_15_299', 'tenant_default', 'Up to 15 pages', 15, 299, 'Up to 15 pages — $2.99', 1),
+  ('tier_30_599', 'tenant_default', 'Up to 30 pages', 30, 599, 'Up to 30 pages — $5.99', 1),
+  ('tier_45_749', 'tenant_default', 'Up to 45 pages', 45, 749, 'Up to 45 pages — $7.49', 1),
+  ('tier_60_999', 'tenant_default', 'Up to 60 pages', 60, 999, 'Up to 60 pages — $9.99', 1);

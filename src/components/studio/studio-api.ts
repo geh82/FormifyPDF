@@ -240,5 +240,5 @@ export function matchPricingTierForPages(
     .sort((a, b) => Number(a.max_pages) - Number(b.max_pages));
   if (activeSorted.length === 0) return null;
   const safePages = Math.max(1, pageCount);
-  return activeSorted.find((t) => safePages <= Number(t.max_pages)) ?? activeSorted[activeSorted.length - 1];
+  return activeSorted.find((t) => safePages <= Number(t.max_pages)) ?? null;
 }

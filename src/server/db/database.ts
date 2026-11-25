@@ -227,6 +227,19 @@ function seedBaselineData(db: DatabaseSync) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  const legacy30 = db
+    .prepare("SELECT id FROM pricing_tiers WHERE id = 'tier_30_499' AND tenant_id = 'tenant_default'")
+    .get() as { id: string } | undefined;
+  if (legacy30) {
+    db.prepare("DELETE FROM pricing_tiers WHERE id = 'tier_30_499' AND tenant_id = 'tenant_default'").run();
+    const insTier = db.prepare(
+      "INSERT OR IGNORE INTO pricing_tiers (id, tenant_id, name, max_pages, price_cents, description, is_active) VALUES (?, 'tenant_default', ?, ?, ?, ?, 1)"
+    );
+    insTier.run("tier_30_599", "Up to 30 pages", 30, 599, "Up to 30 pages — $5.99");
+    insTier.run("tier_45_749", "Up to 45 pages", 45, 749, "Up to 45 pages — $7.49");
+    insTier.run("tier_60_999", "Up to 60 pages", 60, 999, "Up to 60 pages — $9.99");
+  }
 }
 
 export function getRolePermissions(db: DatabaseSync, roleName: string): string[] {

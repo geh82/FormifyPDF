@@ -114,6 +114,15 @@ describe("Public Conversion Flow, Toggle Enforcement (403) & Pricing Tier Valida
       pricingTiers: Array<{ max_pages: number; price_cents: number }>;
     };
     expect(pubConfig.ok).toBe(true);
+    expect(pubConfig.pricingTiers.some((t) => t.max_pages === 30 && t.price_cents === 599)).toBe(
+      true
+    );
+    expect(pubConfig.pricingTiers.some((t) => t.max_pages === 45 && t.price_cents === 749)).toBe(
+      true
+    );
+    expect(pubConfig.pricingTiers.some((t) => t.max_pages === 60 && t.price_cents === 999)).toBe(
+      true
+    );
     expect(pubConfig.pricingTiers.some((t) => t.max_pages === 50 && t.price_cents === 799)).toBe(
       true
     );
