@@ -89,7 +89,8 @@ function overlapArea(
 }
 
 function isPurePunctuationOrPlaceholder(txt: string): boolean {
-  return /^[_\.\-\s\[\]\(\)\|\/:;,*]+$/.test(txt.trim());
+  const t = txt.trim();
+  return /^[_\.\-\s\[\]\(\)\|\/:;,*]+$/.test(t) || /^\d+\s*:\s*\d*$/.test(t);
 }
 
 function isPureConnectorText(txt: string): boolean {
@@ -110,13 +111,14 @@ function normalizeTextKerningArtifacts(txt: string): string {
   return txt
     .replace(/\bnam\s+es\b/gi, "names")
     .replace(/\bvoornam\s+e\b/gi, "voorname")
+    .replace(/\bnum\s+ber\b/gi, "number")
     .replace(/\bM\s+OTOR\b/g, "MOTOR")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 const SECONDARY_LANGUAGE_MARKERS =
-  /\b(verkeersregisternr|buitelandse|besigh|posadres|straatadres|geen\s+odometer|gesleep|links|middel|regs|eienaar|instelling|gevolmagtigde|verteenwoordiger|naam|handtekening|datum|voorletters|voorname|nommer|kode|poskode|stuurwiel|onderstelnommer|lisensienommer|fabrikaat|reeksnaam|selfoonnommer)\b/i;
+  /\b(verkeersregisternr|buitelandse|besigh|posadres|straatadres|geen\s+odometer|geen\s+enjin|enjin|gesleep|links|middel|regs|eienaar|ek,?\s+die|instelling|gevolmagtigde|verteenwoordiger|naam|handtekening|datum|voorletters|voorname|nommer|kode|poskode|stuurwiel|onderstelnommer|lisensienommer|fabrikaat|reeksnaam|selfoonnommer|spesifiseer|kleur|toegerus|vragvoertuig|vergoeding|kleinhandel|privaat|algehele|breedte|hoogte|agteroorstek|ratkas|ewenaar|ewenaarnommer|ratkasnommer|padwaardigheid|sertifisering|gelde|kwitansie|voertuig|aandrywing|sleepwa|leunwa|selfgedrewe|spesiale\s+voertuig|swaar|tarra|toetsvel|odometer-lesing|passasierskapasiteit|toegeken|aansoek|toetsnommer|opmerkings|beide)\b/i;
 
 function cleanOptionBoxLines(lines: string[]): string {
   const normalized = lines.map((l) => normalizeTextKerningArtifacts(l)).filter(Boolean);
@@ -142,7 +144,6 @@ function cleanOptionBoxLines(lines: string[]): string {
     // Two distinct lines that form a bilingual translation pair where line 1 is complete
     const l1Complete = !/\b(of|and|or|to|for|in|at|the|a|an|with)$/i.test(l1);
     if (l1Complete && lines.length === 2 && l2.split(/\s+/).length >= 1) {
-      // Check if second line is short single-line mirror translation (common in stacked bilingual boxes)
       const sharedWords = l1.toLowerCase().split(/\s+/).filter((w) => l2.toLowerCase().includes(w));
       if (sharedWords.length > 0 || SECONDARY_LANGUAGE_MARKERS.test(l2)) {
         return l1;
@@ -155,7 +156,14 @@ function cleanOptionBoxLines(lines: string[]): string {
 function isSubCaptionText(txt: string, fontSize: number): boolean {
   const clean = txt.trim();
   if (/^\([^)]{2,60}\)$/.test(clean)) return true;
-  if (fontSize <= 8.0 && /^\([a-zA-Z0-9\s\/,\.\-]{2,45}$/.test(clean)) return true;
+  if (
+    fontSize <= 8.0 &&
+    /^\([a-zA-Z0-9\s\/,\.\-]{2,45}$/.test(clean) &&
+    !/\b(and|or|of|the|van|en)\s*$/i.test(clean)
+  ) {
+    return true;
+  }
+  if (fontSize <= 8.5 && /^(kg|kw|cm[3³]|mm|km|km\/h|r)$/i.test(clean)) return true;
   if (
     fontSize <= 8.2 &&
     /^(code\/kode|number\/nommer|initials\/voorletters|describe in full|postal code|poskode|date format|yyyy|dd\/mm|mm\/dd|y\/j|km\s+hour\/uur)/i.test(
@@ -227,14 +235,15 @@ function isInstructionOrBannerText(
   const isInstruction =
     (!hasDottedPlaceholder && clean.length > 78) ||
     effectiveLen > 78 ||
-    /^\((mark with|tick|cross|please|note|see |national |act\b|block letters|complete in|use black)/i.test(
+    /^\((mark with|merk met|tick|cross|please|note|see |national |act\b|block letters|complete in|use black)/i.test(
       clean
     ) ||
     lower.startsWith("please complete") ||
     lower.startsWith("note:") ||
     lower.includes("in block letters") ||
     lower.includes("mark with an x") ||
-    lower.includes("merk met 'n x");
+    lower.includes("merk met 'n x") ||
+    lower.includes("merk met x");
 
   return { isHeader: isSectionHeader, isInstruction };
 }
@@ -382,21 +391,28 @@ export function buildMergedTextLabels(
         }
         const candW = cand.x1 - cand.x0;
         const alignedLeft = Math.abs(cand.x0 - base.x0) <= 10.0;
+        const alignedIndent = cand.x0 >= base.x0 - 4 && cand.x0 - base.x0 <= 18.0;
         const alignedCenter =
           Math.abs((cand.x0 + cand.x1) / 2 - (base.x0 + base.x1) / 2) <= 12.0;
         const similarFont = Math.abs(cand.fontSize - base.fontSize) <= 2.0;
         const baseEndsIncomplete =
           /\b(and|or|of|for|to|in|at|with|by|the|a|an|if|van|en|se)\s*$/i.test(base.text) ||
           /[\/\-&,]\s*$/.test(base.text);
+        const isBilingualStack =
+          SECONDARY_LANGUAGE_MARKERS.test(cand.text) &&
+          !SECONDARY_LANGUAGE_MARKERS.test(base.text) &&
+          cand.text.length <= 68 &&
+          (alignedLeft || alignedIndent || alignedCenter);
         const isContinuationPhrase =
-          candW <= 165 &&
-          !cand.text.includes(".") &&
-          cand.text.length <= 36 &&
-          (/^[a-z(]/.test(cand.text) || baseEndsIncomplete) &&
-          !base.hasColon;
+          isBilingualStack ||
+          (candW <= 165 &&
+            !(cand.text.trim().endsWith(".") && !/\betc\.\)?$/i.test(cand.text.trim())) &&
+            cand.text.length <= 42 &&
+            (/^[a-z(]/.test(cand.text) || baseEndsIncomplete) &&
+            !base.hasColon);
 
         if (
-          (alignedLeft || alignedCenter) &&
+          (alignedLeft || alignedCenter || isBilingualStack) &&
           similarFont &&
           isContinuationPhrase &&
           !hasHorizontalDividerBetween(
@@ -428,7 +444,8 @@ export function buildMergedTextLabels(
  */
 function mergeCollinearLines(
   lines: ExtractedLineSegment[],
-  horizontal: boolean
+  horizontal: boolean,
+  crossingLines: ExtractedLineSegment[] = []
 ): ExtractedLineSegment[] {
   if (lines.length === 0) return [];
   const buckets: ExtractedLineSegment[][] = [];
@@ -450,13 +467,34 @@ function mergeCollinearLines(
     else buckets.push([l]);
   }
 
+  const hasPerpCrossingBetween = (
+    pos: number,
+    gapStart: number,
+    gapEnd: number
+  ): boolean => {
+    if (horizontal || crossingLines.length === 0) return false;
+    return crossingLines.some(
+      (h) =>
+        h.x0 <= pos + 2.0 &&
+        h.x1 >= pos - 2.0 &&
+        h.y0 >= gapStart - 1.0 &&
+        h.y0 <= gapEnd + 1.0
+    );
+  };
+
   const merged: ExtractedLineSegment[] = [];
   for (const b of buckets) {
     b.sort((a, c) => startKey(a) - startKey(c));
     let cur = { ...b[0] };
     for (let i = 1; i < b.length; i++) {
       const nxt = b[i];
-      if (startKey(nxt) <= endKey(cur) + 2.8) {
+      const gap = startKey(nxt) - endKey(cur);
+      const canBridge =
+        gap <= 2.8 ||
+        (!horizontal &&
+          gap <= 6.5 &&
+          !hasPerpCrossingBetween(cur.x0, endKey(cur), startKey(nxt)));
+      if (canBridge) {
         if (horizontal) {
           cur.x1 = Math.max(cur.x1, nxt.x1);
           cur.y0 = (cur.y0 + nxt.y0) / 2;
@@ -643,6 +681,43 @@ export function clusterCharCells(
     };
   };
 
+  // Identify vertically repeating small box columns (e.g. Pass/Fail checklist columns with >=3 aligned rows),
+  // strictly excluding boxes that are part of horizontal >=3-cell character combs so multi-cell combs don't pollute column counts.
+  const repeatingSmallCols: Array<{ x0: number; x1: number; count: number }> = [];
+  for (const sb of sorted) {
+    const sw = sb.x1 - sb.x0;
+    const sh = sb.y1 - sb.y0;
+    if (sw > 24 || sh > 24) continue;
+    const sameRowNeighbors = sorted.filter(
+      (other) =>
+        other !== sb &&
+        Math.abs(other.y0 - sb.y0) <= 3.5 &&
+        Math.abs((other.y1 - other.y0) - sh) <= 3.0 &&
+        Math.min(Math.abs(other.x0 - sb.x1), Math.abs(sb.x0 - other.x1)) <= 2.5
+    );
+    if (sameRowNeighbors.length >= 2) continue;
+    const rowRunCount = sorted.filter(
+      (other) =>
+        Math.abs(other.y0 - sb.y0) <= 3.5 &&
+        other.x0 >= sb.x0 - 45 &&
+        other.x1 <= sb.x1 + 45 &&
+        other.x1 - other.x0 <= 24
+    ).length;
+    if (rowRunCount >= 3) continue;
+    const existingCol = repeatingSmallCols.find(
+      (c) => Math.abs(c.x0 - sb.x0) <= 2.5 && Math.abs(c.x1 - sb.x1) <= 2.5
+    );
+    if (existingCol) existingCol.count++;
+    else repeatingSmallCols.push({ x0: sb.x0, x1: sb.x1, count: 1 });
+  }
+  const isRepeatingCheckboxCol = (b: { x0: number; x1: number }) =>
+    repeatingSmallCols.some(
+      (c) =>
+        c.count >= 3 &&
+        Math.abs(c.x0 - b.x0) <= 2.5 &&
+        Math.abs(c.x1 - b.x1) <= 2.5
+    );
+
   for (let i = 0; i < sorted.length; i++) {
     if (used[i]) continue;
     const base = sorted[i];
@@ -674,7 +749,19 @@ export function clusterCharCells(
       }
     }
 
-    if (row.length >= 3) {
+    const isTwoCellComb =
+      row.length === 2 &&
+      row[1].x0 - row[0].x1 >= -1.5 &&
+      row[1].x0 - row[0].x1 <= 2.5 &&
+      Math.abs((row[1].x1 - row[1].x0) - bw) <= 2.5 &&
+      Math.abs((row[1].y1 - row[1].y0) - bh) <= 2.0 &&
+      bw >= 8.5 &&
+      bh >= 9.0 &&
+      !isRepeatingCheckboxCol(row[0]) &&
+      !isRepeatingCheckboxCol(row[1]) &&
+      !getDividerBetween(row[0].x1, row[1].x0, base.y0, base.y1).hasWordDivider;
+
+    if (row.length >= 3 || isTwoCellComb) {
       const gaps: number[] = [];
       for (let k = 1; k < row.length; k++) {
         gaps.push(row[k].x0 - row[k - 1].x1);
@@ -712,7 +799,7 @@ export function clusterCharCells(
 
 /**
  * Detect standalone horizontal lines subdivided by >=3 uniform vertical tick marks (comb notches).
- * Drops leading/trailing cells that already contain pre-printed static prefixes (e.g. "20").
+ * Drops leading/trailing cells that already contain pre-printed static prefixes (e.g. "20") or text labels.
  */
 export function detectTickCombBaselines(
   hLines: ExtractedLineSegment[],
@@ -723,7 +810,7 @@ export function detectTickCombBaselines(
 
   const cellHasPrintedDigits = (c: PdfRect): boolean =>
     textRuns.some((tr) => {
-      if (!/\d/.test(tr.text)) return false;
+      if (!/[A-Za-z0-9]/.test(tr.text)) return false;
       const cx = (tr.x0 + tr.x1) / 2;
       const cy = (tr.y0 + tr.y1) / 2;
       return cx >= c.x - 1 && cx <= c.x + c.width + 1 && cy >= c.y - 1 && cy <= c.y + c.height + 1;
@@ -1012,7 +1099,8 @@ export function findBestAssociatedLabel(
   };
 
   for (const lbl of labels) {
-    const txt = normalizeTextKerningArtifacts(lbl.text);
+    const rawLineTxt = lbl.lines && lbl.lines.length >= 2 ? cleanOptionBoxLines(lbl.lines) : lbl.text;
+    const txt = normalizeTextKerningArtifacts(rawLineTxt);
     if (
       txt.length < 2 ||
       isPurePunctuationOrPlaceholder(txt) ||
@@ -1028,8 +1116,20 @@ export function findBestAssociatedLabel(
 
     // Parenthetical sub-caption immediately BELOW this field (within 11.5pt under box)
     if (lbl.isSubCaption && !isSmallControl) {
+      const isUnitOnly = /^(kg|kw|cm[3³]|mm|km|km\/h|r)$/i.test(txt.trim());
+      const sitsRightOfOtherField =
+        isUnitOnly &&
+        Boolean(
+          candidateList?.some(
+            (c) =>
+              Math.abs((c.y0 + c.y1) / 2 - lmidY) <= 8.5 &&
+              c.x1 <= lbl.x0 + 4 &&
+              lbl.x0 - c.x1 <= 45
+          )
+        );
       const horizOverlap = Math.min(rx1, lbl.x1) - Math.max(rx0, lbl.x0);
       if (
+        !sitsRightOfOtherField &&
         lbl.y0 >= ry1 - 2 &&
         lbl.y0 - ry1 <= 11.5 &&
         (horizOverlap > 8 || (lbl.x0 >= rx0 - 15 && lbl.x1 <= rx1 + 25))
@@ -1062,10 +1162,11 @@ export function findBestAssociatedLabel(
       }
     }
 
-    // 2. Directly above label
+    // 2. Directly above label (never let multi-line bilingual option rows separated by a large vertical offset hijack table rows below)
     if (lbl.y1 <= ry0 + 6 && ry0 - lbl.y1 <= 22) {
       const horizOverlap = Math.min(rx1, lbl.x1) - Math.max(rx0, lbl.x0);
-      if (horizOverlap > -10) {
+      const isLongChoiceParagraph = txt.length > 48 && /^[A-Z]\s+[A-Z]/.test(txt);
+      if (horizOverlap > -10 && !isLongChoiceParagraph) {
         const dist =
           Math.max(0, ry0 - lbl.y1) * 2.2 + Math.abs(rx0 - lbl.x0) * 0.35;
         if (dist < 115 && dist < bestAboveScore) {
@@ -1096,7 +1197,8 @@ export function findBestAssociatedLabel(
       score: bestRightScore,
     };
   }
-  if (bestLeftText && (!bestAboveText || bestLeftScore <= bestAboveScore * 1.45)) {
+  if (bestLeftText && (!bestAboveText || bestLeftScore <= bestAboveScore * 1.45 || rx0 - bestLeftScore >= 0)) {
+    // Prefer row-aligned left prompt over an above label when both exist and left label is a real prompt (even across a wide option strip)
     const cleanLeft = cleanSubCaptionLabel(bestLeftText.replace(/[:]+$/, "").trim());
     let combined = cleanLeft;
     const isDateUnitSub = /^(y\/j|yy|ccyy|mm|dd|m|d)$/i.test(bestBelowSubCaption);
@@ -1184,7 +1286,8 @@ export function findBestAssociatedLabel(
 function inspectCellCaptionAndWritableArea(
   box: { x0: number; y0: number; x1: number; y1: number },
   labels: MergedTextLabel[],
-  rects: ExtractedRectPrimitive[]
+  rects: ExtractedRectPrimitive[],
+  hasAdjacentRightWidget = false
 ): {
   skipAsHeaderOrLabel: boolean;
   writableRect: [number, number, number, number];
@@ -1268,8 +1371,17 @@ function inspectCellCaptionAndWritableArea(
     };
   }
 
-  // Case C: Prompt on left side of wide non-shaded cell, leaving >= 42pt empty writing space on the right
+  const isChoiceCodeOrBilingualCell =
+    /^[A-Z]\s+[A-Z]/.test(captionText) ||
+    overlappingLabels.some((l) => (l.lines?.length ?? 1) >= 2 && SECONDARY_LANGUAGE_MARKERS.test(l.text)) ||
+    /\(\d+\.\d+/.test(captionText) ||
+    /^note\b/i.test(captionText);
+
+  // Case C: Prompt on left side of wide non-shaded cell, leaving >= 48pt empty writing space on the right
+  // Strictly skip when an adjacent widget/comb/checkbox sits immediately to the right of `box.x1` or cell is a bilingual choice option
   if (
+    !hasAdjacentRightWidget &&
+    !isChoiceCodeOrBilingualCell &&
     maxTextX1 - box.x0 <= bw * 0.48 &&
     box.x1 - maxTextX1 >= 48 &&
     bh >= 13 &&
@@ -1517,7 +1629,7 @@ function fuseAndClassifyPageGeometryCore(params: {
   const pageH = geom.pageHeightPt;
 
   const mergedH = mergeCollinearLines(geom.hLines, true);
-  const mergedV = mergeCollinearLines(geom.vLines, false);
+  const mergedV = mergeCollinearLines(geom.vLines, false, mergedH);
 
   const labels = [
     ...buildMergedTextLabels(geom.textRuns, mergedV, mergedH, "pdf_text"),
@@ -1647,6 +1759,7 @@ function fuseAndClassifyPageGeometryCore(params: {
     x1: number;
     y1: number;
     optionLabel: string;
+    labels: MergedTextLabel[];
     source: DetectionSource;
   }> = [];
   const largerBoxes: typeof combinedCells = [];
@@ -1686,17 +1799,36 @@ function fuseAndClassifyPageGeometryCore(params: {
       return ov > Math.max(1, (l.x1 - l.x0) * (l.y1 - l.y0)) * 0.45;
     });
 
-    if (cw >= 7.0 && cw <= 30.0 && ch >= 7.5 && ch <= 34.0) {
-      // Check for double-wide date sub-box bisected by a centered ':', '/', '-', or '|' divider (e.g. [ 2:0 |  :  |  :  |  :  ])
+    const isStaticPromptOrClauseText = (txt: string): boolean => {
+      const c = txt.trim();
+      const upperSectionHeader =
+        c.length >= 4 &&
+        c === c.toUpperCase() &&
+        /[A-Z]{4}/.test(c) &&
+        !/^(RSA ID|VIN|DOB|ID NO|CC|VAT|PASS|FAIL|YES|NO|N\/A)$/i.test(c);
+      return (
+        /^\d+\s*:\s*\d*$/.test(c) ||
+        /^\d{1,3}$/.test(c) ||
+        /^[LR]\/[SW]\d$/i.test(c) ||
+        upperSectionHeader ||
+        /\(\d+\.\d+/.test(c) ||
+        /^(test date|re-?test date|retest,?\s+on\s+or\s+before|odometer reading|result|pit no\.?|note|remarks|brake formula|park brake|from|to|testing station infrastructure|examiner of vehicles infrastructure)/i.test(
+          c
+        )
+      );
+    };
+
+    if (cw >= 7.0 && cw <= 42.0 && ch >= 7.5 && ch <= 34.0) {
+      // Check for double-wide date/time sub-box bisected by a centered ':', '/', '-', or '|' divider
       const bisectRun =
-        cw >= 20.0 &&
+        cw >= 18.0 &&
         geom.textRuns.find((tr) => {
           if (!/^[:/\-|]$/.test(tr.text.trim())) return false;
           const cx = (tr.x0 + tr.x1) / 2;
           const cy = (tr.y0 + tr.y1) / 2;
           const boxMidX = (cell.x0 + cell.x1) / 2;
           return (
-            Math.abs(cx - boxMidX) <= cw * 0.22 &&
+            Math.abs(cx - boxMidX) <= cw * 0.25 &&
             cy >= cell.y0 - 2 &&
             cy <= cell.y1 + 2
           );
@@ -1710,28 +1842,34 @@ function fuseAndClassifyPageGeometryCore(params: {
         continue;
       }
 
-      if (overlappingLabels.length === 0 && !boxContainsPrintedDigits(cell)) {
-        emptySmallBoxes.push(cell);
-      } else if (overlappingLabels.length > 0) {
-        const optLines = overlappingLabels.flatMap((t) => t.lines ?? [t.text]);
-        const optTxt = cleanOptionBoxLines(optLines);
-        if (
-          optTxt.length <= 28 &&
-          ch >= 11 &&
-          ch <= 34 &&
-          !overlappingLabels.some((t) => t.isHeaderLike || t.isInstructionLike)
-        ) {
-          overlappingLabels.forEach((l) => consumedOptionLabels.add(l));
-          optionLabeledBoxes.push({
-            ...cell,
-            optionLabel: optTxt,
-            source: cell.source,
-          });
+      if (cw <= 30.0) {
+        if (overlappingLabels.length === 0 && !boxContainsPrintedDigits(cell)) {
+          emptySmallBoxes.push(cell);
+        } else if (overlappingLabels.length > 0) {
+          const optLines = overlappingLabels.flatMap((t) => t.lines ?? [t.text]);
+          const optTxt = cleanOptionBoxLines(optLines);
+          if (
+            optTxt.length <= 28 &&
+            ch >= 11 &&
+            ch <= 34 &&
+            !isStaticPromptOrClauseText(optTxt) &&
+            !overlappingLabels.some((t) => t.isHeaderLike || t.isInstructionLike)
+          ) {
+            optionLabeledBoxes.push({
+              ...cell,
+              optionLabel: optTxt,
+              labels: overlappingLabels,
+              source: cell.source,
+            });
+          }
         }
+        continue;
       }
-    } else if (
+    }
+
+    if (
       cw > 30 &&
-      cw <= 165 &&
+      cw <= 225 &&
       ch >= 11 &&
       ch <= 38 &&
       overlappingLabels.length > 0 &&
@@ -1739,11 +1877,16 @@ function fuseAndClassifyPageGeometryCore(params: {
     ) {
       const optLines = overlappingLabels.flatMap((t) => t.lines ?? [t.text]);
       const optTxt = cleanOptionBoxLines(optLines);
-      if (optTxt.length >= 2 && optTxt.length <= 80) {
-        overlappingLabels.forEach((l) => consumedOptionLabels.add(l));
+      if (
+        optTxt.length >= 2 &&
+        optTxt.length <= 140 &&
+        !isStaticPromptOrClauseText(optTxt) &&
+        (cw <= 165 || (!optTxt.endsWith(":") && !optTxt.includes("...")))
+      ) {
         optionLabeledBoxes.push({
           ...cell,
           optionLabel: optTxt,
+          labels: overlappingLabels,
           source: cell.source,
         });
       }
@@ -1753,11 +1896,23 @@ function fuseAndClassifyPageGeometryCore(params: {
     }
   }
 
-  // Filter out option-box labels, right-column translation mirrors of left-margin labels,
-  // pure connectors, and inline dotted placeholder prompts from externalPromptLabels.
+  // Filter out right-column translation mirrors of left-margin labels, pure connectors, and inline dotted placeholder prompts.
+  // Note: consumedOptionLabels is populated later inside mergedOptionGroups ONLY when a checkbox or radio group is actually emitted.
   const rightMirrorLabels = new Set<MergedTextLabel>();
   for (const rLbl of labels) {
-    if (rLbl.x0 < pageW * 0.50 || rLbl.isHeaderLike || rLbl.isInstructionLike) continue;
+    if (rLbl.x0 < pageW * 0.45 || rLbl.isHeaderLike || rLbl.isInstructionLike) continue;
+    const isNearRightOrAfrikaans =
+      rLbl.x1 >= pageW - 55 || SECONDARY_LANGUAGE_MARKERS.test(rLbl.text);
+    if (!isNearRightOrAfrikaans) continue;
+    const hasFieldRightOfLabel = combinedCells.some(
+      (c) =>
+        c.y0 <= (rLbl.y0 + rLbl.y1) / 2 + 8 &&
+        c.y1 >= (rLbl.y0 + rLbl.y1) / 2 - 8 &&
+        c.x0 >= rLbl.x1 - 4 &&
+        c.x0 <= rLbl.x1 + 85 &&
+        c.x1 - c.x0 >= 10
+    );
+    if (hasFieldRightOfLabel) continue;
     const hasLeftMirror = labels.some(
       (lLbl) =>
         lLbl !== rLbl &&
@@ -1770,13 +1925,14 @@ function fuseAndClassifyPageGeometryCore(params: {
     if (hasLeftMirror) rightMirrorLabels.add(rLbl);
   }
 
-  const externalPromptLabels = labels.filter(
-    (l) =>
-      !consumedOptionLabels.has(l) &&
-      !rightMirrorLabels.has(l) &&
-      !l.isInlinePlaceholder &&
-      !isPureConnectorText(l.text)
-  );
+  const getExternalPromptLabels = () =>
+    labels.filter(
+      (l) =>
+        !consumedOptionLabels.has(l) &&
+        !rightMirrorLabels.has(l) &&
+        !l.isInlinePlaceholder &&
+        !isPureConnectorText(l.text)
+    );
   const consumedBelowCaptionLabels = new Set<MergedTextLabel>();
 
   // Stage 3: Group character cells & tick combs
@@ -1860,15 +2016,95 @@ function fuseAndClassifyPageGeometryCore(params: {
     }
   }
 
+  // Identify checklist table description columns (wide text columns >= 4 rows with clause items + right checkboxes)
+  const checklistColMap = new Map<
+    string,
+    { x0: number; x1: number; itemRows: Array<{ y0: number; y1: number; text: string }> }
+  >();
+  for (const c of combinedCells) {
+    const cw = c.x1 - c.x0;
+    const ch = c.y1 - c.y0;
+    if (cw < 105 || cw > 195 || ch < 8 || ch > 34) continue;
+    const hasRightCheckboxes = emptySmallBoxes.some(
+      (sb) =>
+        sb.x0 >= c.x1 - 2.5 &&
+        sb.x0 <= c.x1 + 3.0 &&
+        Math.abs(sb.y0 - c.y0) <= 3.0 &&
+        sb.y1 <= c.y1 + 3.0
+    );
+    if (!hasRightCheckboxes) continue;
+    const colKey = `${Math.round(c.x0 / 3) * 3}:${Math.round(c.x1 / 3) * 3}`;
+    const cellLabels = labels.filter((l) => {
+      const ov = overlapArea([c.x0, c.y0, c.x1, c.y1], [l.x0, l.y0, l.x1, l.y1]);
+      return ov > Math.max(1, (l.x1 - l.x0) * (l.y1 - l.y0)) * 0.45;
+    });
+    const txt = cellLabels.map((l) => l.text).join(" ").trim();
+    const entry = checklistColMap.get(colKey) ?? { x0: c.x0, x1: c.x1, itemRows: [] };
+    if (txt) {
+      entry.itemRows.push({ y0: c.y0, y1: c.y1, text: txt });
+    }
+    checklistColMap.set(colKey, entry);
+  }
+  const activeChecklistCols = Array.from(checklistColMap.values()).filter(
+    (col) => col.itemRows.length >= 4 && col.itemRows.some((r) => /\(\d+\.\d+/.test(r.text))
+  );
+
   for (const sb of leftoverSmall) {
     const sw = sb.x1 - sb.x0;
     const sh = sb.y1 - sb.y0;
-    if (
-      sw <= 24 &&
-      sh <= 24 &&
-      sw / Math.max(1, sh) >= 0.65 &&
-      sw / Math.max(1, sh) <= 1.45
-    ) {
+    const ratio = sw / Math.max(1, sh);
+    // Skip wide comb-row padding cells immediately right of a char_cells grid
+    const abutsCharGrid = charGroups.some((g) => {
+      const gx1 = Math.max(...g.cells.map((c) => c.x + c.width));
+      const gy0 = Math.min(...g.cells.map((c) => c.y));
+      const gy1 = Math.max(...g.cells.map((c) => c.y + c.height));
+      return Math.abs(sb.x0 - gx1) <= 2.5 && sb.y0 >= gy0 - 2.5 && sb.y1 <= gy1 + 2.5;
+    });
+    if (abutsCharGrid && sw >= 18) continue;
+
+    if (sw <= 24 && sh <= 24 && ratio >= 0.65 && ratio <= 1.36) {
+      // Check if this checkbox sits in a structured Pass/Fail checklist checkbox column
+      let checklistCbLabel: string | undefined;
+      let skipEmptyChecklistRow = false;
+      for (const col of activeChecklistCols) {
+        if (sb.x0 >= col.x1 - 2.5 && sb.x0 <= col.x1 + 32.0) {
+          const itemMatch = col.itemRows.find(
+            (r) =>
+              (sb.y0 >= r.y0 - 2 && sb.y1 <= r.y1 + 2) ||
+              Math.abs((r.y0 + r.y1) / 2 - (sb.y0 + sb.y1) / 2) <= 5.0
+          );
+          const rowRuns = geom.textRuns.filter(
+            (tr) =>
+              tr.x0 >= col.x0 - 2 &&
+              tr.x1 <= col.x1 + 2 &&
+              tr.y0 >= sb.y0 - 2 &&
+              tr.y1 <= sb.y1 + 2
+          );
+          const rowRunText = rowRuns.map((t) => t.text).join(" ").trim();
+          // Skip blank spacer rows & upper section headers (e.g. "07 STEERING") in checklist checkbox columns
+          if (!itemMatch && !rowRunText) {
+            skipEmptyChecklistRow = true;
+            break;
+          }
+          if (/^\d{2}\s+[A-Z]{4,}/.test(rowRunText)) {
+            skipEmptyChecklistRow = true;
+            break;
+          }
+          // Skip clause-only overflow row (e.g. "(5.46)") if checkboxes were already emitted on row 1 of that item
+          if (/^\(\d+\.\d+.*\)$/.test(rowRunText) && !itemMatch) {
+            skipEmptyChecklistRow = true;
+            break;
+          }
+          const resolvedText = itemMatch ? itemMatch.text : rowRunText;
+          if (resolvedText) {
+            const isFirstBox = sb.x0 <= col.x1 + 3.0;
+            const cleanItem = resolvedText.replace(/[:]+$/, "").trim();
+            checklistCbLabel = `${cleanItem} - ${isFirstBox ? "Option 1" : "Option 2"}`;
+          }
+          break;
+        }
+      }
+      if (skipEmptyChecklistRow) continue;
       candidates.push({
         kind: "checkbox",
         x0: sb.x0,
@@ -1877,6 +2113,7 @@ function fuseAndClassifyPageGeometryCore(params: {
         y1: sb.y1,
         source: "vector_checkbox",
         sources: [sb.source, "vector_checkbox"],
+        explicitLabel: checklistCbLabel,
         evidence: [`Square empty checkbox geometry (${roundPt(sw)}x${roundPt(sh)}pt)`],
       });
     }
@@ -1888,23 +2125,70 @@ function fuseAndClassifyPageGeometryCore(params: {
     (a, b) => Math.round(a.y0 / 6) - Math.round(b.y0 / 6) || a.x0 - b.x0
   );
   for (const opt of sortedOpts) {
-    const row = optionRows.find(
-      (r) =>
-        Math.abs(r[0].y0 - opt.y0) <= 5.5 &&
-        Math.abs(r[0].y1 - opt.y1) <= 5.5 &&
-        opt.x0 - r[r.length - 1].x1 <= 34.0
-    );
+    const row = optionRows.find((r) => {
+      const prev = r[r.length - 1];
+      if (
+        Math.abs(r[0].y0 - opt.y0) > 5.5 ||
+        Math.abs(r[0].y1 - opt.y1) > 5.5 ||
+        opt.x0 - prev.x1 > 14.0
+      ) {
+        return false;
+      }
+      // Never jump across an empty small box or char_cells group sitting between options
+      const blockedByEmptyBox = emptySmallBoxes.some(
+        (sb) =>
+          sb.x0 >= prev.x1 - 1 &&
+          sb.x1 <= opt.x0 + 1 &&
+          sb.y0 <= (opt.y0 + opt.y1) / 2 + 4 &&
+          sb.y1 >= (opt.y0 + opt.y1) / 2 - 4
+      );
+      return !blockedByEmptyBox;
+    });
     if (row) row.push(opt);
     else optionRows.push([opt]);
   }
 
+  // Merge vertically stacked 2-row option blocks sharing the same choice grid (e.g. ACR "Used for the transportation of" 2x2 block)
+  const usedOptRowIdx = new Set<number>();
+  const mergedOptionGroups: Array<typeof optionLabeledBoxes> = [];
+  for (let i = 0; i < optionRows.length; i++) {
+    if (usedOptRowIdx.has(i)) continue;
+    const baseRow = [...optionRows[i]];
+    usedOptRowIdx.add(i);
+    if (baseRow.length >= 2) {
+      const bx0 = Math.min(...baseRow.map((o) => o.x0));
+      const bx1 = Math.max(...baseRow.map((o) => o.x1));
+      let curBy1 = Math.max(...baseRow.map((o) => o.y1));
+      for (let j = i + 1; j < optionRows.length; j++) {
+        if (usedOptRowIdx.has(j)) continue;
+        const candRow = optionRows[j];
+        if (candRow.length < 1 || baseRow.length + candRow.length > 6) continue;
+        const cy0 = Math.min(...candRow.map((o) => o.y0));
+        const cx0 = Math.min(...candRow.map((o) => o.x0));
+        const cx1 = Math.max(...candRow.map((o) => o.x1));
+        if (
+          cy0 - curBy1 >= -2 &&
+          cy0 - curBy1 <= 3.0 &&
+          Math.abs(cx0 - bx0) <= 8 &&
+          cx1 <= bx1 + 25 &&
+          !/^[A-Z]\s/.test(candRow[0].optionLabel)
+        ) {
+          baseRow.push(...candRow);
+          curBy1 = Math.max(...candRow.map((o) => o.y1));
+          usedOptRowIdx.add(j);
+        }
+      }
+    }
+    mergedOptionGroups.push(baseRow);
+  }
+
   const usedOptionBoxKeys = new Set<string>();
   const isToggleOptionPhrase = (txt: string): boolean =>
-    /\b(no\s+odometer|geen\s+odometer|not\s+applicable|n\/a|yes|no|ja|nee|agree|exempt|unknown|none|same\s+as)\b/i.test(
+    /\b(no\s+odometer|geen\s+odometer|no\s+engine|geen\s+enjin|not\s+(?:yet\s+)?allocated|nog\s+nie\s+toegeken(?:\s+nie)?|nie\s+toegeken(?:\s+nie)?|not\s+applicable|n\/a|yes|no|ja|nee|agree|exempt|unknown|none|same\s+as)\b/i.test(
       txt
     );
 
-  for (const row of optionRows) {
+  for (const row of mergedOptionGroups) {
     if (row.length === 1) {
       const single = row[0];
       const sw = single.x1 - single.x0;
@@ -1920,6 +2204,7 @@ function fuseAndClassifyPageGeometryCore(params: {
           other.x1 - other.x0 >= 35
       );
       if (!isLeftTableLabel && sw <= 110 && sh <= 30 && isToggleOptionPhrase(cleanOpt)) {
+        single.labels.forEach((l) => consumedOptionLabels.add(l));
         usedOptionBoxKeys.add(`${roundPt(single.x0)}:${roundPt(single.y0)}`);
         candidates.push({
           kind: "checkbox",
@@ -1938,6 +2223,7 @@ function fuseAndClassifyPageGeometryCore(params: {
     }
 
     if (row.length < 2 || row.length > 6) continue;
+    row.forEach((r) => r.labels.forEach((l) => consumedOptionLabels.add(l)));
     const gx0 = Math.min(...row.map((r) => r.x0));
     const gy0 = Math.min(...row.map((r) => r.y0));
     const gx1 = Math.max(...row.map((r) => r.x1));
@@ -1945,7 +2231,7 @@ function fuseAndClassifyPageGeometryCore(params: {
 
     const rowPrompt = findBestAssociatedLabel(
       [gx0, gy0, gx1, gy1],
-      externalPromptLabels,
+      getExternalPromptLabels(),
       false,
       candidates.map((c) => ({ x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1 }))
     );
@@ -1984,6 +2270,8 @@ function fuseAndClassifyPageGeometryCore(params: {
       scoreBoost: 0.14,
     });
   }
+
+  const externalPromptLabels = getExternalPromptLabels();
 
   // Group radio circle nodes on the same row/column into unified radio groups
   const groupedRadioRows: Array<typeof radioCandidateNodes> = [];
@@ -2046,6 +2334,70 @@ function fuseAndClassifyPageGeometryCore(params: {
   for (const box of largerBoxes) {
     if (usedOptionBoxKeys.has(`${roundPt(box.x0)}:${roundPt(box.y0)}`)) continue;
 
+    // Skip empty blank filler rows inside a structured Pass/Fail checklist description column
+    const inEmptyChecklistColumn = activeChecklistCols.some(
+      (col) => Math.abs(box.x0 - col.x0) <= 3.5 && Math.abs(box.x1 - col.x1) <= 3.5
+    );
+    const cellHasLabels = labels.some((l) => {
+      const ov = overlapArea([box.x0, box.y0, box.x1, box.y1], [l.x0, l.y0, l.x1, l.y1]);
+      return ov > Math.max(1, (l.x1 - l.x0) * (l.y1 - l.y0)) * 0.45;
+    });
+    if (inEmptyChecklistColumn && !cellHasLabels) continue;
+
+    // Detect formula/equation inline writable blanks per y-baseline inside wide cells (e.g. "Brake formula: ___ x 4.4 / 1000 = ___" + "Park brake: 12% of brake force: ___")
+    const runsInside = geom.textRuns
+      .filter(
+        (tr) =>
+          !tr.isCheckboxGlyph &&
+          !tr.isRadioGlyph &&
+          tr.x0 >= box.x0 - 1 &&
+          tr.x1 <= box.x1 + 1 &&
+          tr.y0 >= box.y0 - 2 &&
+          tr.y1 <= box.y1 + 2
+      )
+      .sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+    if (runsInside.length >= 1) {
+      const joinedInside = runsInside.map((r) => r.text).join(" ");
+      if (/(?:formula:|force:|=\s*$|\bx\s+\d)/i.test(joinedInside)) {
+        const lineRows: Array<typeof runsInside> = [];
+        for (const tr of runsInside) {
+          const row = lineRows.find((r) => Math.abs(r[0].y0 - tr.y0) <= 3.5);
+          if (row) row.push(tr);
+          else lineRows.push([tr]);
+        }
+        let emittedBlank = false;
+        for (const rowRuns of lineRows) {
+          rowRuns.sort((a, b) => a.x0 - b.x0);
+          const rowText = rowRuns.map((r) => r.text).join(" ");
+          if (!/(?:formula:|force:|=\s*$|\bx\s+\d)/i.test(rowText)) continue;
+          const ry0 = Math.max(box.y0 + 0.5, Math.min(...rowRuns.map((r) => r.y0)) - 1.5);
+          const ry1 = Math.min(box.y1 - 0.5, Math.max(...rowRuns.map((r) => r.y1)) + 2.0);
+          for (let ri = 0; ri < rowRuns.length; ri++) {
+            const curR = rowRuns[ri];
+            const nextStart = ri + 1 < rowRuns.length ? rowRuns[ri + 1].x0 : box.x1 - 2;
+            const blankGap = nextStart - curR.x1;
+            if (blankGap >= 20 && /[:=]$/.test(curR.text.trim())) {
+              const basePhrase = rowRuns[0].text.replace(/[:]+$/, "").trim();
+              const subLbl = ri === 0 ? curR.text.replace(/[:]+$/, "").trim() : `${basePhrase} (Result)`;
+              candidates.push({
+                kind: "box",
+                x0: curR.x1 + 2,
+                y0: ry0,
+                x1: nextStart - 2,
+                y1: ry1,
+                source: "ai_semantic_fusion",
+                sources: [box.source, "ai_semantic_fusion"],
+                explicitLabel: subLbl,
+                evidence: [`Detected inline formula/equation blank after '${curR.text}'`],
+              });
+              emittedBlank = true;
+            }
+          }
+        }
+        if (emittedBlank) continue;
+      }
+    }
+
     // Skip if box already surrounds a char_cells or radio group
     const coversStructuredGroup = candidates.some(
       (c) =>
@@ -2055,7 +2407,28 @@ function fuseAndClassifyPageGeometryCore(params: {
     );
     if (coversStructuredGroup) continue;
 
-    const inspected = inspectCellCaptionAndWritableArea(box, labels, geom.rects);
+    // Check if there is already a widget/empty box immediately to the right of `box.x1` on the same row
+    // (reaching up to 36pt across static "2:0" century prefixes before YYMMDD comb fields).
+    const hasAdjacentRightWidget =
+      candidates.some(
+        (c) =>
+          c.x0 >= box.x1 - 3.5 &&
+          c.x0 <= box.x1 + (c.kind === "char_cells" ? 36.0 : 14.0) &&
+          Math.abs((c.y0 + c.y1) / 2 - (box.y0 + box.y1) / 2) <= 6.0
+      ) ||
+      emptySmallBoxes.some(
+        (sb) =>
+          sb.x0 >= box.x1 - 3.5 &&
+          sb.x0 <= box.x1 + 14.0 &&
+          Math.abs((sb.y0 + sb.y1) / 2 - (box.y0 + box.y1) / 2) <= 6.0
+      );
+
+    const inspected = inspectCellCaptionAndWritableArea(
+      box,
+      labels,
+      geom.rects,
+      hasAdjacentRightWidget
+    );
     if (inspected.skipAsHeaderOrLabel) continue;
 
     const [wx0, wy0, wx1, wy1] = inspected.writableRect;
@@ -2240,10 +2613,15 @@ function fuseAndClassifyPageGeometryCore(params: {
     });
   }
 
-  // Inline text underline & dotted-line cues ("Full Name: ________" OR "Place . . . . . . . Plek")
+  // Inline text underline & dotted-line cues ("Full Name: ________", "R _________", OR "Place . . . . . . . Plek")
   for (const lbl of labels) {
+    const fs = Math.max(6.5, lbl.fontSize || 8.5);
+    const targetH = Math.max(10.5, Math.min(14.5, fs * 1.32));
+    const cleanBottomY = Math.min(pageH - 2, lbl.y1 + 1.5);
+    const cleanTopY = Math.max(0, cleanBottomY - targetH);
+
     const m = lbl.text.match(
-      /^([A-Za-z0-9 /()-]{2,45}?):?\s*((?:(?:\.\s*){5,}|[_\.]{4,}))(?:\s+[A-Za-z/()-]{2,30})?\s*$/
+      /^([A-Za-z0-9 /()-]{1,45}?):?\s*((?:(?:\.\s*){5,}|[_\.]{4,}))(?:\s+[A-Za-z/()-]{2,30})?\s*$/
     );
     if (m) {
       const prefixRaw = m[1].trim();
@@ -2252,7 +2630,6 @@ function fuseAndClassifyPageGeometryCore(params: {
       const matchEnd = matchStart + m[2].length;
       const suffixRaw = lbl.text.slice(matchEnd).trim();
       const len = Math.max(1, lbl.text.length);
-      const fs = Math.max(6.5, lbl.fontSize || 8.5);
       const ux0 = Math.max(
         lbl.x0 + (lbl.x1 - lbl.x0) * (matchStart / len),
         lbl.x0 + prefixRaw.length * fs * 0.56 + 6
@@ -2264,16 +2641,47 @@ function fuseAndClassifyPageGeometryCore(params: {
               lbl.x1 - suffixRaw.length * fs * 0.52 - 4
             )
           : lbl.x0 + (lbl.x1 - lbl.x0) * (matchEnd / len);
-      if (ux1 - ux0 >= 28 && prefix.length >= 2) {
+      if (ux1 - ux0 >= 24 && prefix.length >= 1) {
+        let finalInlineLabel = prefix;
+        if (prefix === "R") {
+          const leftRowLbl = labels.find(
+            (other) =>
+              other !== lbl &&
+              !other.isHeaderLike &&
+              !other.isInstructionLike &&
+              other.x1 <= lbl.x0 + 4 &&
+              Math.abs((other.y0 + other.y1) / 2 - (lbl.y0 + lbl.y1) / 2) <= 14
+          );
+          finalInlineLabel = leftRowLbl
+            ? `${cleanSubCaptionLabel(leftRowLbl.text)} (R)`
+            : "Fees / Amount (R)";
+        }
         standaloneUnderlines.push({
           x0: ux0,
-          y0: Math.max(0, lbl.y0 - 4),
+          y0: cleanTopY,
           x1: ux1,
-          y1: lbl.y1 + 2,
+          y1: cleanBottomY,
           source: lbl.source === "pdf_text" ? "vector_underline" : "ocr_region",
-          explicitLabel: prefix,
+          explicitLabel: finalInlineLabel,
         });
       }
+      continue;
+    }
+
+    // Pure continuation dotted/underscore lines (e.g. stacked Remarks continuation lines ". . . . . . .")
+    if (
+      lbl.isInlinePlaceholder &&
+      /^(?:[.\s_-]+)$/.test(lbl.text.trim()) &&
+      (lbl.text.match(/[._]/g)?.length ?? 0) >= 6 &&
+      lbl.x1 - lbl.x0 >= 40
+    ) {
+      standaloneUnderlines.push({
+        x0: lbl.x0,
+        y0: cleanTopY,
+        x1: lbl.x1,
+        y1: cleanBottomY,
+        source: lbl.source === "pdf_text" ? "vector_underline" : "ocr_region",
+      });
     }
   }
 
@@ -2291,17 +2699,21 @@ function fuseAndClassifyPageGeometryCore(params: {
       const cand = sortedUnderlines[j];
       const prev = stack[stack.length - 1];
       const vGap = cand.y1 - prev.y1;
+      const alignedStartOrContinuation =
+        Math.abs(cand.x0 - prev.x0) <= 12 ||
+        (cand.x0 < prev.x0 && prev.x0 - cand.x0 <= 60 && !cand.explicitLabel);
       const sameCols =
-        Math.abs(cand.x0 - prev.x0) <= 12 && Math.abs(cand.x1 - prev.x1) <= 18;
+        alignedStartOrContinuation && Math.abs(cand.x1 - prev.x1) <= 18;
       const hasMidLabel = labels.some(
         (l) =>
           !l.isInstructionLike &&
+          !l.isInlinePlaceholder &&
           l.y1 > prev.y1 + 2 &&
           l.y0 < cand.y1 - 2 &&
           l.x0 >= cand.x0 - 8 &&
           l.x0 <= cand.x1
       );
-      if (sameCols && vGap >= 11 && vGap <= 26 && !hasMidLabel) {
+      if (sameCols && vGap >= 10 && vGap <= 26 && !hasMidLabel) {
         stack.push(cand);
         usedU[j] = true;
       }
@@ -2423,19 +2835,34 @@ function fuseAndClassifyPageGeometryCore(params: {
     const candArea = Math.max(1, rawRect.width * rawRect.height);
 
     // Check overlap against already fused higher-priority fields
+    // For radio groups with explicit optionRects, measure overlap against each option widget rather than the bounding hull
+    // so an inline comb grid inside an L-shaped 2x2 radio block (e.g. "other (specify): [][][][]") does not suppress the radio group.
     const overlappingIdx = pageFields.findIndex((existing) => {
+      const exTuple: [number, number, number, number] = [
+        existing.rect.x,
+        existing.rect.y,
+        existing.rect.x + existing.rect.width,
+        existing.rect.y + existing.rect.height,
+      ];
+      const exArea = Math.max(1, existing.rect.width * existing.rect.height);
+
+      if (cand.kind === "radio" && cand.optionRects && Object.keys(cand.optionRects).length > 0) {
+        return Object.values(cand.optionRects).some((optR) => {
+          const optOv = overlapArea(
+            [optR.x, optR.y, optR.x + optR.width, optR.y + optR.height],
+            exTuple
+          );
+          const optArea = Math.max(1, optR.width * optR.height);
+          return optOv > Math.min(optArea, exArea) * 0.48 && existing.type !== "radio";
+        });
+      }
+
       const iou = computeRectIoU(existing.rect, rawRect);
       if (iou >= 0.35) return true;
       const ov = overlapArea(
         [rawRect.x, rawRect.y, rawRect.x + rawRect.width, rawRect.y + rawRect.height],
-        [
-          existing.rect.x,
-          existing.rect.y,
-          existing.rect.x + existing.rect.width,
-          existing.rect.y + existing.rect.height,
-        ]
+        exTuple
       );
-      const exArea = Math.max(1, existing.rect.width * existing.rect.height);
       const minArea = Math.min(candArea, exArea);
 
       // Lower-priority underline overlapping >= 28% with a char_cells/radio/multiline field is redundant
@@ -2634,27 +3061,83 @@ function fuseAndClassifyPageGeometryCore(params: {
     const cur = pageFields[i];
     if (cur.detectionSource === "existing_acroform") continue;
 
-    // 1a. Split same-row sibling field whose detected label is only a short sub-caption (e.g. "Number") or empty
+    // 1a. Split same-row sibling field whose detected label is only a short sub-caption ("Number", "from", "to", "Other (specify)") or empty
+    const isOtherOrTimeSub = /^(from|to|other\s*\(specify\)?|other)$/i.test(
+      cur.originalLabelText.trim()
+    );
     const isShortSubOnly =
       cur.originalLabelText === "" ||
+      isOtherOrTimeSub ||
       /^(number|initials|code|extension|ext)$/i.test(cur.originalLabelText.trim());
     if (isShortSubOnly && cur.type !== "checkbox" && cur.type !== "radio") {
-      // Find closest left sibling on the same row
+      // Find closest left sibling on the same row (allowing multi-row radio blocks overlapping cur.rect.y)
       let leftSib: DetectedFormField | null = null;
       for (let k = i - 1; k >= 0; k--) {
         const candSib = pageFields[k];
-        if (Math.abs(candSib.rect.y - cur.rect.y) <= 5.5 && candSib.rect.x < cur.rect.x) {
+        const sameBand =
+          Math.abs(candSib.rect.y - cur.rect.y) <= 5.5 ||
+          (candSib.type === "radio" &&
+            cur.rect.y >= candSib.rect.y - 4 &&
+            cur.rect.y + cur.rect.height <= candSib.rect.y + candSib.rect.height + 4);
+        if (sameBand && candSib.rect.x < cur.rect.x) {
           leftSib = candSib;
           break;
         }
       }
+      // Prefix "Time (from)" / "Time (to)" or "Fuel type (other)" / "Main colour (other)"
+      if (/^(from|to)$/i.test(cur.originalLabelText.trim())) {
+        const rowTimeLbl = promptLabelsAfterUnderlines.find(
+          (l) =>
+            !l.isHeaderLike &&
+            !l.isInstructionLike &&
+            /^time$/i.test(l.text.trim()) &&
+            l.x1 <= cur.rect.x &&
+            cur.rect.x - l.x1 <= 240 &&
+            Math.abs((l.y0 + l.y1) / 2 - (cur.rect.y + cur.rect.height / 2)) <= 10.5
+        );
+        if (rowTimeLbl) {
+          applyRefinedLabel(
+            cur,
+            `Time (${cur.originalLabelText.trim().toLowerCase()})`,
+            `Scoped '${cur.originalLabelText}' comb field with row prompt 'Time'`
+          );
+          continue;
+        }
+      }
+      if (/^other\s*\(specify\)?$/i.test(cur.originalLabelText.trim()) && leftSib?.type === "radio") {
+        const baseRadioLbl = leftSib.originalLabelText.replace(/\s*\([^)]+\)\s*$/, "").trim();
+        if (baseRadioLbl) {
+          applyRefinedLabel(
+            cur,
+            `${baseRadioLbl} (other)`,
+            `Scoped 'other (specify)' comb field to '${baseRadioLbl}'`
+          );
+          continue;
+        }
+      }
+      if (
+        !cur.originalLabelText &&
+        leftSib?.type === "radio" &&
+        leftSib.options.some((o) => /other/i.test(o))
+      ) {
+        const baseRadioLbl = leftSib.originalLabelText.replace(/\s*\([^)]+\)\s*$/, "").trim();
+        if (baseRadioLbl) {
+          applyRefinedLabel(
+            cur,
+            `${baseRadioLbl} (other)`,
+            `Scoped unlabeled comb grid inside '${baseRadioLbl}' other-option row`
+          );
+          continue;
+        }
+      }
       if (leftSib && leftSib.originalLabelText) {
         const gapFromSib = cur.rect.x - (leftSib.rect.x + leftSib.rect.width);
-        if (gapFromSib >= -2 && gapFromSib <= 75) {
+        if (gapFromSib >= -2 && gapFromSib <= 95) {
           const sibBase = leftSib.originalLabelText.replace(/\s*\([^)]+\)\s*$/, "").trim();
           const curSub = cur.originalLabelText.trim().toLowerCase();
           if (
             curSub &&
+            !isOtherOrTimeSub &&
             !leftSib.originalLabelText.toLowerCase().includes(`(${curSub})`) &&
             curSub !== sibBase.toLowerCase()
           ) {
@@ -2672,6 +3155,24 @@ function fuseAndClassifyPageGeometryCore(params: {
               `Inherited split sibling 'Initials' slot from '${sibBase}'`
             );
             continue;
+          }
+          if (!cur.originalLabelText && leftSib.type === "currency" && /receipt\s+num/i.test(sibBase)) {
+            applyRefinedLabel(
+              cur,
+              "Receipt number",
+              `Inherited split sibling 'Receipt number' from '${sibBase}'`
+            );
+            continue;
+          }
+          if (!cur.originalLabelText && /^(.+?)\s+and\s+(.+)$/i.test(sibBase)) {
+            const parts = sibBase.match(/^(.+?)\s+and\s+(.+)$/i);
+            if (parts && parts[1].length >= 4 && parts[2].length >= 4) {
+              const p1 = parts[1].trim();
+              const p2 = parts[2].trim().charAt(0).toUpperCase() + parts[2].trim().slice(1);
+              applyRefinedLabel(leftSib, p1, `Split compound left sibling '${sibBase}' -> '${p1}'`);
+              applyRefinedLabel(cur, p2, `Split compound right sibling '${sibBase}' -> '${p2}'`);
+              continue;
+            }
           }
         }
       }
@@ -2692,6 +3193,31 @@ function fuseAndClassifyPageGeometryCore(params: {
           );
           continue;
         }
+      }
+    }
+
+    // 1c. Unlabeled Vehicle Register Number grid following Licence number + [not allocated] toggle checkbox
+    if (!cur.originalLabelText && cur.type === "char_cells") {
+      const sameRowLeftFields = pageFields.filter(
+        (candSib, k) =>
+          k < i &&
+          Math.abs(candSib.rect.y - cur.rect.y) <= 6.5 &&
+          candSib.rect.x < cur.rect.x
+      );
+      const hasNotAllocLeft = sameRowLeftFields.some((s) =>
+        /not\s+(?:yet\s+)?allocated/i.test(s.originalLabelText)
+      );
+      const regPromptOwner = sameRowLeftFields.find((s) =>
+        /vehicle\s+register\s+number/i.test(s.originalLabelText)
+      );
+      if (hasNotAllocLeft || regPromptOwner) {
+        applyRefinedLabel(
+          cur,
+          "Vehicle register number",
+          "Associated vehicle register number comb grid following not-allocated toggle",
+          0.9
+        );
+        continue;
       }
     }
 
@@ -2751,18 +3277,19 @@ function fuseAndClassifyPageGeometryCore(params: {
       if (ofMatch && ofMatch[1].trim().length >= 4) {
         const rolePart = ofMatch[1].trim();
         ctxPrefix = rolePart.charAt(0).toUpperCase() + rolePart.slice(1);
-      }
-      for (const item of rowGrp) {
-        if (
-          item.originalLabelText &&
-          !item.originalLabelText.toLowerCase().includes(ctxPrefix.toLowerCase())
-        ) {
-          applyRefinedLabel(
-            item,
-            `${ctxPrefix} - ${item.originalLabelText}`,
-            `Scoped multi-column row with left context '${ctxPrefix}'`,
-            Math.max(item.confidence, 0.9)
-          );
+        for (const item of rowGrp) {
+          if (
+            item.originalLabelText &&
+            !/^(remarks|notes|fees)/i.test(item.originalLabelText) &&
+            !item.originalLabelText.toLowerCase().includes(ctxPrefix.toLowerCase())
+          ) {
+            applyRefinedLabel(
+              item,
+              `${ctxPrefix} - ${item.originalLabelText}`,
+              `Scoped multi-column row with left context '${ctxPrefix}'`,
+              Math.max(item.confidence, 0.9)
+            );
+          }
         }
       }
     }

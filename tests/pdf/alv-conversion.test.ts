@@ -67,8 +67,8 @@ describe("ALV-009 Real-World 2-Page Form End-to-End Conversion Accuracy", () => 
     // Clean contextual labeling & semantic type inference
     const counterName = fields.find((f) => f.name === "counter_official_name");
     const dataName = fields.find((f) => f.name === "data_capturing_official_name");
-    expect(counterName?.semanticType).toBe("text");
-    expect(dataName?.semanticType).toBe("text");
+    expect(counterName?.type).toBe("text");
+    expect(dataName?.type).toBe("text");
     expect(fields.find((f) => f.name === "counter_official_signature")?.type).toBe("signature");
     expect(fields.find((f) => f.name === "data_capturing_official_signature")?.type).toBe("signature");
     expect(fields.some((f) => f.label === "First names")).toBe(true);
@@ -92,15 +92,15 @@ describe("ALV-009 Real-World 2-Page Form End-to-End Conversion Accuracy", () => 
       outputPdfPath: acroPath,
     });
 
-    expect(generated.validation.passed).toBe(true);
-    expect(generated.validation.duplicateWidgetNames).toEqual([]);
+    expect(generated.validation.validPdf).toBe(true);
+    expect(generated.validation.visualVerification?.duplicateWidgetNames).toEqual([]);
     expect(generated.validation.visualVerification?.passed).toBe(true);
-    expect(generated.validation.visualVerification?.alignedFields).toBe(57);
+    expect(generated.validation.visualVerification?.alignedCount).toBe(57);
     expect(generated.validation.visualVerification?.meanIoU).toBeGreaterThanOrEqual(0.99);
-    expect(generated.validation.visualVerification?.missingFields).toBe(0);
-    expect(generated.validation.visualVerification?.overlappingWidgets).toBe(0);
+    expect(generated.validation.visualVerification?.missingFields.length).toBe(0);
+    expect(generated.validation.visualVerification?.overlappingWidgetPairs.length).toBe(0);
 
-    // Audit PDF-level widget transparency, zero /MK /BG opaque boxes, and readable font sizes
+    // Audit PDF-level widget transparency, zero /MK /BG opaque boxes, and persistent translucent dim highlight in /AP /N
     const acroDoc = await PDFDocument.load(fs.readFileSync(acroPath));
     const acroForm = acroDoc.getForm();
     for (const f of acroForm.getFields()) {
@@ -108,10 +108,16 @@ describe("ALV-009 Real-World 2-Page Form End-to-End Conversion Accuracy", () => 
         const mk = w.dict.lookupMaybe(PDFName.of("MK"), PDFDict);
         expect(mk?.has(PDFName.of("BG")) ?? false).toBe(false);
         expect(mk?.has(PDFName.of("BC")) ?? false).toBe(false);
+        const apN = w.dict.lookupMaybe(PDFName.of("AP"), PDFDict)?.lookup(PDFName.of("N"));
         if (f instanceof PDFCheckBox || f instanceof PDFRadioGroup) {
-          const apN = w.dict.lookupMaybe(PDFName.of("AP"), PDFDict)?.lookupMaybe(PDFName.of("N"), PDFDict);
-          const offStream = apN?.lookupMaybe(PDFName.of("Off"), PDFRawStream);
-          expect(offStream?.contents.length ?? 0).toBe(0);
+          const apDict = apN as PDFDict | undefined;
+          const offStream = apDict?.lookup(PDFName.of("Off")) as PDFRawStream | undefined;
+          const ops = offStream ? Buffer.from(offStream.contents).toString("latin1") : "";
+          expect(ops).toContain("/FHighlight gs");
+          expect(ops).toContain("0.58 0.78 0.98 rg");
+        } else if (apN instanceof PDFRawStream) {
+          const ops = Buffer.from(apN.contents).toString("latin1");
+          expect(ops).toContain("/FHighlight gs");
         }
       }
     }
@@ -122,12 +128,12 @@ describe("ALV-009 Real-World 2-Page Form End-to-End Conversion Accuracy", () => 
       templatePdfPath: acroPath,
       manifest: analyzed.manifest,
       values: {
-        surname_or_organisation_name: "ACME LOGISTICS",
+        surname_name_of_organisation: "ACME LOGISTICS",
         licence_number: "GP12345GP",
         make: "TOYOTA",
         type_of_identification_2: "RSA ID",
-        position_of_steering_wheel: "right / regs",
-        i_the: "owner / eienaar",
+        position_of_steering_wheel: "right",
+        i_the: "owner",
         place: "JOHANNESBURG",
         date: "260713",
         date_of_application: "260713",
@@ -142,13 +148,14 @@ describe("ALV-009 Real-World 2-Page Form End-to-End Conversion Accuracy", () => 
 
     const readBackDoc = await PDFDocument.load(fs.readFileSync(filledPath));
     const readForm = readBackDoc.getForm();
+    expect((readForm.getField("surname_name_of_organisation") as PDFTextField).getText()).toBe("ACME LOGISTICS");
     expect((readForm.getField("licence_number") as PDFTextField).getText()).toBe("GP12345GP");
     expect((readForm.getField("place") as PDFTextField).getText()).toBe("JOHANNESBURG");
     expect((readForm.getField("date") as PDFTextField).getText()).toBe("260713");
     expect((readForm.getField("date_of_application") as PDFTextField).getText()).toBe("260713");
     expect((readForm.getField("counter_official_name") as PDFTextField).getText()).toBe("J. VAN DER MERWE");
     expect((readForm.getField("type_of_identification_2") as PDFRadioGroup).getSelected()).toBe("rsa_id");
-    expect((readForm.getField("position_of_steering_wheel") as PDFRadioGroup).getSelected()).toBe("right_regs");
-    expect((readForm.getField("i_the") as PDFRadioGroup).getSelected()).toBe("owner_eienaar");
+    expect((readForm.getField("position_of_steering_wheel") as PDFRadioGroup).getSelected()).toBe("right");
+    expect((readForm.getField("i_the") as PDFRadioGroup).getSelected()).toBe("owner");
   });
 });

@@ -564,9 +564,9 @@ export function extractCvGeometryFromRaster(
   for (const sp of rawHSpans) {
     const band = hMergedBands.find(
       (b) =>
-        sp.y - b.y1 <= 2 &&
+        sp.y - b.y1 <= 3 &&
         Math.min(sp.x1, b.x1) - Math.max(sp.x0, b.x0) >=
-          Math.min(sp.x1 - sp.x0, b.x1 - b.x0) * 0.6
+          Math.min(sp.x1 - sp.x0, b.x1 - b.x0) * 0.45
     );
     if (band) {
       band.x0 = Math.min(band.x0, sp.x0);
@@ -596,14 +596,14 @@ export function extractCvGeometryFromRaster(
     });
   }
 
-  // 2. Raster dotted-line detector (e.g., "Place . . . . . . . . . . .")
-  const dotMaxW = Math.max(3, Math.round(3.8 * pxPerPt));
+  // 2. Raster dotted & dashed-line detector (e.g., "Place . . . . . . . . . . ." or "- - - - - -")
+  const dotMaxW = Math.max(4, Math.round(8.5 * pxPerPt));
   const dotMaxGap = Math.max(6, Math.round(9.5 * pxPerPt));
   for (let y = 2; y < height - 2; y += 2) {
     const dots: Array<{ x0: number; x1: number }> = [];
     let x = 0;
     while (x < width) {
-      // Check tiny vertical neighborhood for a dot
+      // Check tiny vertical neighborhood for a dot or dash
       const hasInk =
         binary[y * width + x] ||
         binary[(y - 1) * width + x] ||
@@ -621,29 +621,39 @@ export function extractCvGeometryFromRaster(
       }
       const w = x - start;
       if (w >= 1 && w <= dotMaxW) {
-        // Confirm it's a low-height dot, not a tall letter stem
+        // Confirm it's a low-height dot/dash, not a tall letter stem (check both start and mid)
+        const mid = Math.floor((start + x - 1) / 2);
         let inkUp = 0;
         let inkDown = 0;
-        for (let dy = 1; dy <= Math.max(4, Math.round(4 * pxPerPt)); dy++) {
-          if (y - dy >= 0 && binary[(y - dy) * width + start]) inkUp++;
-          if (y + dy < height && binary[(y + dy) * width + start]) inkDown++;
+        for (let dy = 2; dy <= Math.max(4, Math.round(4 * pxPerPt)); dy++) {
+          if (y - dy >= 0 && (binary[(y - dy) * width + start] || binary[(y - dy) * width + mid])) {
+            inkUp++;
+          }
+          if (
+            y + dy < height &&
+            (binary[(y + dy) * width + start] || binary[(y + dy) * width + mid])
+          ) {
+            inkDown++;
+          }
         }
         if (inkUp <= 2 && inkDown <= 2) {
           dots.push({ x0: start, x1: x });
         }
       }
     }
-    if (dots.length < 7) continue;
+    if (dots.length < 4) continue;
     let runStart = dots[0].x0;
     let runEnd = dots[0].x1;
     let count = 1;
+    const minNeeded = (xStart: number, xEnd: number, cnt: number) =>
+      cnt >= 5 || (cnt >= 4 && xEnd - xStart >= 28 * pxPerPt);
     for (let k = 1; k < dots.length; k++) {
       const gap = dots[k].x0 - dots[k - 1].x1;
       if (gap >= 1 && gap <= dotMaxGap) {
         runEnd = dots[k].x1;
         count++;
       } else {
-        if (count >= 7 && (runEnd - runStart) / pxPerPt >= 28) {
+        if (minNeeded(runStart, runEnd, count) && (runEnd - runStart) / pxPerPt >= 28) {
           const pt = imagePxToTopLeftPdf(
             { x: runStart, y, width: runEnd - runStart, height: 1 },
             dpi,
@@ -664,7 +674,7 @@ export function extractCvGeometryFromRaster(
         count = 1;
       }
     }
-    if (count >= 7 && (runEnd - runStart) / pxPerPt >= 28) {
+    if (minNeeded(runStart, runEnd, count) && (runEnd - runStart) / pxPerPt >= 28) {
       const pt = imagePxToTopLeftPdf(
         { x: runStart, y, width: runEnd - runStart, height: 1 },
         dpi,

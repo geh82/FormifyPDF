@@ -121,7 +121,8 @@ function recordLineOrBox(
   lineWidth: number,
   hLines: ExtractedLineSegment[],
   vLines: ExtractedLineSegment[],
-  rects: ExtractedRectPrimitive[]
+  rects: ExtractedRectPrimitive[],
+  shortHDashes?: ExtractedLineSegment[]
 ) {
   const x0 = Math.min(rx0, rx1);
   const y0 = Math.min(ry0, ry1);
@@ -138,6 +139,19 @@ function recordLineOrBox(
       x1,
       y1: (y0 + y1) / 2,
       thickness: Math.max(0.4, rh || lineWidth),
+      source: kind === "fill" ? "thin_fill" : "stroke",
+    });
+    return;
+  }
+
+  // Short horizontal dot or dash segment (candidate for vector dotted/dashed underline clustering)
+  if (shortHDashes && rh <= 2.5 && rw >= 0.6 && rw < 6.0) {
+    shortHDashes.push({
+      x0,
+      y0: (y0 + y1) / 2,
+      x1,
+      y1: (y0 + y1) / 2,
+      thickness: Math.max(0.5, rh || lineWidth),
       source: kind === "fill" ? "thin_fill" : "stroke",
     });
     return;
@@ -197,7 +211,8 @@ function parseConstructPath(
   hLines: ExtractedLineSegment[],
   vLines: ExtractedLineSegment[],
   rects: ExtractedRectPrimitive[],
-  circles: ExtractedCirclePrimitive[]
+  circles: ExtractedCirclePrimitive[],
+  shortHDashes: ExtractedLineSegment[]
 ) {
   const paintOp = Number(args[0] ?? pdfjsLib.OPS.stroke);
   const opsData = args[1];
@@ -235,7 +250,7 @@ function parseConstructPath(
   if (dataArr.length === 0 && minMax && minMax.length >= 4) {
     const [x0, y0] = applyMat(ctm, Number(minMax[0]), Number(minMax[1]));
     const [x1, y1] = applyMat(ctm, Number(minMax[2]), Number(minMax[3]));
-    recordLineOrBox(x0, y0, x1, y1, kind, fillColor, lineWidth, hLines, vLines, rects);
+    recordLineOrBox(x0, y0, x1, y1, kind, fillColor, lineWidth, hLines, vLines, rects, shortHDashes);
     return;
   }
 
@@ -318,6 +333,15 @@ function parseConstructPath(
           thickness: lineWidth,
           source: "stroke",
         });
+      } else if (dy <= 1.4 && dx >= 0.6 && dx < 6.0) {
+        shortHDashes.push({
+          x0: Math.min(p0x, p1x),
+          y0: (p0y + p1y) / 2,
+          x1: Math.max(p0x, p1x),
+          y1: (p0y + p1y) / 2,
+          thickness: lineWidth,
+          source: "stroke",
+        });
       } else if (dx <= 1.6 && dy >= 5.0) {
         vLines.push({
           x0: (p0x + p1x) / 2,
@@ -344,7 +368,8 @@ function parseConstructPath(
         lineWidth,
         hLines,
         vLines,
-        rects
+        rects,
+        shortHDashes
       );
     }
 
@@ -464,6 +489,7 @@ export async function extractPageStructuralGeometry(
   const rects: ExtractedRectPrimitive[] = [];
   const circles: ExtractedCirclePrimitive[] = [];
   const imageRegions: ExtractedImageRegion[] = [];
+  const shortHDashes: ExtractedLineSegment[] = [];
 
   for (let i = 0; i < opList.fnArray.length; i++) {
     const fn = opList.fnArray[i];
@@ -507,7 +533,8 @@ export async function extractPageStructuralGeometry(
         hLines,
         vLines,
         rects,
-        circles
+        circles,
+        shortHDashes
       );
     } else if (
       fn === OPS.paintImageXObject ||
@@ -530,6 +557,55 @@ export async function extractPageStructuralGeometry(
           height: y1 - y0,
         });
       }
+    }
+  }
+
+  // Cluster collinear short horizontal dots/dashes (>= 6 evenly spaced segments) into synthetic hLines
+  if (shortHDashes.length >= 6) {
+    const dashBands: ExtractedLineSegment[][] = [];
+    const sortedDashes = [...shortHDashes].sort(
+      (a, b) => a.y0 - b.y0 || a.x0 - b.x0
+    );
+    for (const d of sortedDashes) {
+      const band = dashBands.find((b) => Math.abs(b[0].y0 - d.y0) <= 1.5);
+      if (band) band.push(d);
+      else dashBands.push([d]);
+    }
+    for (const band of dashBands) {
+      if (band.length < 6) continue;
+      band.sort((a, b) => a.x0 - b.x0);
+      let run: ExtractedLineSegment[] = [band[0]];
+      const flushRun = () => {
+        if (run.length >= 6) {
+          const rx0 = run[0].x0;
+          const rx1 = run[run.length - 1].x1;
+          if (rx1 - rx0 >= 24.0) {
+            const avgY = run.reduce((s, d) => s + d.y0, 0) / run.length;
+            const maxT = run.reduce((m, d) => Math.max(m, d.thickness), 0.75);
+            hLines.push({
+              x0: rx0,
+              y0: avgY,
+              x1: rx1,
+              y1: avgY,
+              thickness: maxT,
+              source: "stroke",
+            });
+          }
+        }
+      };
+      for (let di = 1; di < band.length; di++) {
+        const cur = band[di];
+        const prev = run[run.length - 1];
+        const gap = cur.x0 - prev.x1;
+        const wDiff = Math.abs((cur.x1 - cur.x0) - (prev.x1 - prev.x0));
+        if (gap >= 0.4 && gap <= 9.0 && wDiff <= 3.0) {
+          run.push(cur);
+        } else {
+          flushRun();
+          run = [cur];
+        }
+      }
+      flushRun();
     }
   }
 

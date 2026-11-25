@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import {
   PDFArray,
   PDFCheckBox,
+  PDFContentStream,
   PDFDict,
   PDFDocument,
   PDFDropdown,
@@ -11,9 +12,12 @@ import {
   PDFNumber,
   PDFOptionList,
   PDFRadioGroup,
+  PDFRawStream,
+  PDFRef,
   PDFString,
   PDFTextField,
   StandardFonts,
+  decodePDFRawStream,
   rgb,
 } from "pdf-lib";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
@@ -418,8 +422,12 @@ async function analyzePdfNode(
 
       // Trigger local Raster Computer Vision + Tesseract OCR on scanned / image-based / forced pages
       let extraLabels: ReturnType<typeof buildMergedTextLabels> = [];
+      const hasLargeFormImage = geom.imageRegions.some(
+        (im) => im.width >= geom.pageWidthPt * 0.45 && im.height >= geom.pageHeightPt * 0.35
+      );
       const isImageHeavyLowVector =
-        geom.imageRegions.length > 0 && geom.drawingOpCount < 6 && pageInfo.wordCount < 15;
+        (geom.imageRegions.length > 0 && geom.drawingOpCount < 6 && pageInfo.wordCount < 15) ||
+        (hasLargeFormImage && geom.drawingOpCount < 15 && pageInfo.wordCount < 80);
       const shouldRunCvOcr =
         enableOcr && (pageInfo.needsOcr || forceOcr || isImageHeavyLowVector);
 
@@ -592,8 +600,35 @@ async function generateAcroFormNode(payload: {
   let createdWidgets = 0;
   const usedNames = new Set<string>(form.getFields().map((f) => f.getName()));
 
+  const getOrCreateHighlightExtGState = (): PDFRef => {
+    const extKey = "__formifyHighlightGsRef";
+    const ctxAny = pdfDoc.context as unknown as Record<string, PDFRef | undefined>;
+    if (ctxAny[extKey]) return ctxAny[extKey]!;
+    const gsDict = pdfDoc.context.obj({
+      Type: "ExtGState",
+      ca: 0.18,
+      CA: 0.48,
+      BM: "Normal",
+    });
+    const ref = pdfDoc.context.register(gsDict);
+    ctxAny[extKey] = ref;
+    return ref;
+  };
+
+  const getRotationAppearanceMatrix = (
+    rot: 0 | 90 | 180 | 270,
+    vw: number,
+    vh: number
+  ): [number, number, number, number, number, number] => {
+    if (rot === 90) return [0, 1, -1, 0, roundPt(vh), 0];
+    if (rot === 180) return [-1, 0, 0, -1, roundPt(vw), roundPt(vh)];
+    if (rot === 270) return [0, -1, 1, 0, 0, roundPt(vw)];
+    return [1, 0, 0, 1, 0, 0];
+  };
+
   const ensureSignatureWidgetOnPage = (
     page: (typeof pages)[number],
+    rot: 0 | 90 | 180 | 270,
     fieldName: string,
     label: string,
     x0: number,
@@ -601,16 +636,28 @@ async function generateAcroFormNode(payload: {
     x1: number,
     y1: number
   ) => {
-    const sw = Math.max(10, x1 - x0);
-    const sh = Math.max(8, y1 - y0);
-    const emptyApStream = pdfDoc.context.stream("", {
+    const rw = roundPt(Math.max(10, x1 - x0));
+    const rh = roundPt(Math.max(8, y1 - y0));
+    const vw = rot === 90 || rot === 270 ? rh : rw;
+    const vh = rot === 90 || rot === 270 ? rw : rh;
+    const hlRef = getOrCreateHighlightExtGState();
+    const sigOps = [
+      "q",
+      "/FHighlight gs",
+      "0.58 0.78 0.98 rg",
+      "0.42 0.60 0.85 RG",
+      "0.55 w",
+      `0.3 0.3 ${roundPt(Math.max(2, vw - 0.6))} ${roundPt(Math.max(2, vh - 0.6))} re B`,
+      "Q",
+    ].join("\n");
+    const sigApStream = pdfDoc.context.stream(sigOps, {
       Type: "XObject",
       Subtype: "Form",
-      BBox: [0, 0, sw, sh],
-      Matrix: [1, 0, 0, 1, 0, 0],
-      Resources: {},
+      BBox: [0, 0, vw, vh],
+      Matrix: getRotationAppearanceMatrix(rot, vw, vh),
+      Resources: { ExtGState: { FHighlight: hlRef } },
     });
-    const emptyApRef = pdfDoc.context.register(emptyApStream);
+    const sigApRef = pdfDoc.context.register(sigApStream);
 
     const widgetDict = pdfDoc.context.obj({
       Type: "Annot",
@@ -622,7 +669,8 @@ async function generateAcroFormNode(payload: {
       F: 4,
       P: page.ref,
       BS: { W: 0 },
-      AP: { N: emptyApRef },
+      ...(rot !== 0 ? { MK: { R: rot } } : {}),
+      AP: { N: sigApRef },
     });
     const widgetRef = pdfDoc.context.register(widgetDict);
 
@@ -750,6 +798,7 @@ async function generateAcroFormNode(payload: {
     } else if (fld.type === "signature") {
       ensureSignatureWidgetOnPage(
         page,
+        rot,
         fieldName,
         fld.label || fieldName,
         x0,
@@ -840,15 +889,16 @@ async function generateAcroFormNode(payload: {
   // so underlying printed grid lines, borders, and choice text remain 100% visible.
   stripOpaqueWidgetBackgrounds(pdfDoc, form);
 
+  const helvFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
   try {
-    const helv = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    form.updateFieldAppearances(helv);
+    form.updateFieldAppearances(helvFont);
   } catch {
     // Non-fatal fallback if any custom widget lacks default appearance formatting
   }
 
-  // Replace pdf-lib's hardcoded opaque white checkbox/radio /AP /N streams with transparent vector /AP /N streams
-  applyTransparentControlAppearances(pdfDoc, form);
+  // Replace/augment /AP /N streams with persistent translucent dim highlight tint across ALL widgets
+  applyDimHighlightAppearances(pdfDoc, form, helvFont);
+  form.acroForm.dict.set(PDFName.of("NeedAppearances"), pdfDoc.context.obj(false));
 
   fs.mkdirSync(path.dirname(payload.outputPdfPath), { recursive: true });
   const outBytes = await pdfDoc.save({ useObjectStreams: false });
@@ -888,107 +938,329 @@ function stripOpaqueWidgetBackgrounds(
 }
 
 /**
- * Build completely transparent Normal (/N) Form XObject appearance streams for CheckBox and RadioGroup
- * widgets so that:
- * - Off state draws nothing (preserving underlying printed borders and bilingual option labels at 100% clarity)
- * - On state draws a crisp dark-ink / navy selection 'X' (and perimeter highlight for wide text-labeled option boxes)
- *   without painting an opaque white background over underlying printed text.
+ * Apply persistent translucent dim fill highlight + crisp subtle border inside Normal (/N) Form XObject
+ * appearance streams for ALL AcroForm widgets (TextFields, Comb grids, Dropdowns, OptionLists, CheckBoxes,
+ * RadioGroups, and Signatures).
+ *
+ * Uses PDF ExtGState (`/ca 0.18 /CA 0.48`) inside `/AP /N` rather than `/MK /BG`, so:
+ * - Fillable areas clearly stand out in any PDF viewer and persist across saves/downloads
+ * - Printed form grid lines, static text (`2:0`), dotted baselines, and borders remain 100% crisp and legible.
  */
-function applyTransparentControlAppearances(
+function getRotationAppearanceMatrix(
+  rot: 0 | 90 | 180 | 270,
+  vw: number,
+  vh: number
+): [number, number, number, number, number, number] {
+  if (rot === 90) return [0, 1, -1, 0, roundPt(vh), 0];
+  if (rot === 180) return [-1, 0, 0, -1, roundPt(vw), roundPt(vh)];
+  if (rot === 270) return [0, -1, 1, 0, 0, roundPt(vw)];
+  return [1, 0, 0, 1, 0, 0];
+}
+
+function applyDimHighlightAppearances(
   pdfDoc: PDFDocument,
-  form: ReturnType<PDFDocument["getForm"]>
+  form: ReturnType<PDFDocument["getForm"]>,
+  font?: Awaited<ReturnType<PDFDocument["embedFont"]>>
 ): void {
-  const makeFormXObj = (ops: string, w: number, h: number) => {
+  const pageRefToRot = new Map<unknown, 0 | 90 | 180 | 270>();
+  for (const page of pdfDoc.getPages()) {
+    pageRefToRot.set(page.ref, normalizeRotation(page.getRotation().angle));
+  }
+
+  const gsDict = pdfDoc.context.obj({
+    Type: "ExtGState",
+    ca: 0.18,
+    CA: 0.48,
+    BM: "Normal",
+  });
+  const hlGsRef = pdfDoc.context.register(gsDict);
+
+  const makeFormXObj = (
+    ops: string,
+    vw: number,
+    vh: number,
+    rot: 0 | 90 | 180 | 270 = 0
+  ) => {
     const stream = pdfDoc.context.stream(ops, {
       Type: "XObject",
       Subtype: "Form",
-      BBox: [0, 0, roundPt(w), roundPt(h)],
-      Matrix: [1, 0, 0, 1, 0, 0],
-      Resources: {},
+      BBox: [0, 0, roundPt(vw), roundPt(vh)],
+      Matrix: getRotationAppearanceMatrix(rot, vw, vh),
+      Resources: { ExtGState: { FHighlight: hlGsRef } },
     });
     return pdfDoc.context.register(stream);
   };
 
   for (const field of form.getFields()) {
-    if (!(field instanceof PDFCheckBox) && !(field instanceof PDFRadioGroup)) {
+    const widgets = field.acroField.getWidgets();
+
+    if (field instanceof PDFCheckBox || field instanceof PDFRadioGroup) {
+      for (const widget of widgets) {
+        const rot = pageRefToRot.get(widget.P()) ?? 0;
+        let mk = widget.dict.lookupMaybe(PDFName.of("MK"), PDFDict);
+        if (mk) {
+          mk.delete(PDFName.of("BG"));
+          mk.delete(PDFName.of("BC"));
+        }
+        if (rot !== 0) {
+          if (!mk) {
+            mk = pdfDoc.context.obj({});
+            widget.dict.set(PDFName.of("MK"), mk);
+          }
+          mk.set(PDFName.of("R"), pdfDoc.context.obj(rot));
+        }
+        widget.dict.set(PDFName.of("BS"), pdfDoc.context.obj({ W: 0 }));
+
+        const rect = widget.getRectangle();
+        const rw = roundPt(Math.max(8, rect.width));
+        const rh = roundPt(Math.max(8, rect.height));
+        const w = rot === 90 || rot === 270 ? rh : rw;
+        const h = rot === 90 || rot === 270 ? rw : rh;
+
+        let onStateName = PDFName.of("Yes");
+        const existingAp = widget.dict.lookupMaybe(PDFName.of("AP"), PDFDict);
+        const existingN = existingAp?.lookupMaybe(PDFName.of("N"), PDFDict);
+        if (existingN) {
+          for (const [k] of existingN.entries()) {
+            if (k !== PDFName.of("Off")) {
+              onStateName = k;
+              break;
+            }
+          }
+        }
+
+        const bx1 = roundPt(Math.max(2, w - 0.6));
+        const by1 = roundPt(Math.max(2, h - 0.6));
+        const offOps = [
+          "q",
+          "/FHighlight gs",
+          "0.58 0.78 0.98 rg",
+          "0.42 0.60 0.85 RG",
+          "0.55 w",
+          `0.3 0.3 ${bx1} ${by1} re B`,
+          "Q",
+        ].join("\n");
+        const offRef = makeFormXObj(offOps, w, h, rot);
+
+        let onOps: string;
+        if (w > 24) {
+          const pad = 1.2;
+          const x1 = roundPt(w - pad * 2);
+          const y1 = roundPt(h - pad * 2);
+          const isNarrowOption = w <= 50;
+          const markSize = isNarrowOption ? 4.2 : 7.5;
+          const markInsetRight = isNarrowOption ? 2.4 : 3.0;
+          const markInsetTop = isNarrowOption ? 2.4 : 2.5;
+          const mx1 = roundPt(w - markInsetRight);
+          const mx0 = roundPt(mx1 - markSize);
+          const my1 = roundPt(h - markInsetTop);
+          const my0 = roundPt(Math.max(2.5, my1 - markSize));
+          const markStroke = isNarrowOption ? "1.15 w" : "1.5 w";
+          onOps = [
+            "q",
+            "/FHighlight gs",
+            "0.58 0.78 0.98 rg",
+            `0.3 0.3 ${bx1} ${by1} re f`,
+            "Q",
+            "q",
+            "0.06 0.24 0.62 RG",
+            "1.3 w",
+            `${pad} ${pad} ${x1} ${y1} re S`,
+            markStroke,
+            `${mx0} ${my0} m ${mx1} ${my1} l ${mx0} ${my1} m ${mx1} ${my0} l S`,
+            "Q",
+          ].join("\n");
+        } else {
+          const p = roundPt(Math.min(3.0, w * 0.2));
+          const rx = roundPt(w - p);
+          const ty = roundPt(h - p);
+          onOps = [
+            "q",
+            "/FHighlight gs",
+            "0.58 0.78 0.98 rg",
+            "0.42 0.60 0.85 RG",
+            "0.55 w",
+            `0.3 0.3 ${bx1} ${by1} re B`,
+            "Q",
+            "q",
+            "0.06 0.14 0.36 RG",
+            "1.4 w",
+            `${p} ${p} m ${rx} ${ty} l ${p} ${ty} m ${rx} ${p} l S`,
+            "Q",
+          ].join("\n");
+        }
+
+        const onRef = makeFormXObj(onOps, w, h, rot);
+        const apNormal = pdfDoc.context.obj({});
+        apNormal.set(onStateName, onRef);
+        apNormal.set(PDFName.of("Off"), offRef);
+
+        const apDict = pdfDoc.context.obj({});
+        apDict.set(PDFName.of("N"), apNormal);
+        widget.dict.set(PDFName.of("AP"), apDict);
+      }
       continue;
     }
 
-    const widgets = field.acroField.getWidgets();
-    for (const widget of widgets) {
-      const mk = widget.dict.lookupMaybe(PDFName.of("MK"), PDFDict);
-      if (mk) {
-        mk.delete(PDFName.of("BG"));
-        mk.delete(PDFName.of("BC"));
-      }
-      widget.dict.set(PDFName.of("BS"), pdfDoc.context.obj({ W: 0 }));
+    // TextField, Comb grid, Dropdown, OptionList: prepend translucent highlight inside /AP /N
+    if (
+      field instanceof PDFTextField ||
+      field instanceof PDFDropdown ||
+      field instanceof PDFOptionList
+    ) {
+      const isComb =
+        field instanceof PDFTextField &&
+        (field.acroField.getFlags() & (1 << 24)) !== 0 &&
+        (field.getMaxLength() ?? 0) >= 2;
+      const combCells = isComb ? field.getMaxLength() ?? 0 : 0;
 
-      const rect = widget.getRectangle();
-      const w = Math.max(8, rect.width);
-      const h = Math.max(8, rect.height);
+      for (const widget of widgets) {
+        const rot = pageRefToRot.get(widget.P()) ?? 0;
+        const rect = widget.getRectangle();
+        const rw = roundPt(Math.max(6, rect.width));
+        const rh = roundPt(Math.max(6, rect.height));
+        const vw = rot === 90 || rot === 270 ? rh : rw;
+        const vh = rot === 90 || rot === 270 ? rw : rh;
 
-      // Determine the exact On-state PDFName already assigned in /AP /N (fallback to 'Yes')
-      let onStateName = PDFName.of("Yes");
-      const existingAp = widget.dict.lookupMaybe(PDFName.of("AP"), PDFDict);
-      const existingN = existingAp?.lookupMaybe(PDFName.of("N"), PDFDict);
-      if (existingN) {
-        for (const [k] of existingN.entries()) {
-          if (k !== PDFName.of("Off")) {
-            onStateName = k;
-            break;
+        if (rot !== 0) {
+          let mk = widget.dict.lookupMaybe(PDFName.of("MK"), PDFDict);
+          if (!mk) {
+            mk = pdfDoc.context.obj({});
+            widget.dict.set(PDFName.of("MK"), mk);
+          }
+
+          // Re-generate pdf-lib text/comb layout in visual [0, 0, vw, vh] coordinates with MK.R=0 to avoid double rotation
+          if (font) {
+            mk.set(PDFName.of("R"), pdfDoc.context.obj(0));
+            const origRect = widget.dict.get(PDFName.of("Rect"));
+            try {
+              widget.setRectangle({ x: 0, y: 0, width: vw, height: vh });
+              field.defaultUpdateAppearances(font);
+            } catch {
+              // Ignore appearance generation failure
+            } finally {
+              if (origRect) {
+                widget.dict.set(PDFName.of("Rect"), origRect);
+              }
+            }
+          }
+
+          mk.set(PDFName.of("R"), pdfDoc.context.obj(rot));
+        }
+
+        const apDict = widget.dict.lookupMaybe(PDFName.of("AP"), PDFDict);
+        const nVal = apDict?.get(PDFName.of("N"));
+        const rawAp = nVal ? pdfDoc.context.lookup(nVal) : undefined;
+
+        let existingOps = "";
+        let resDict = pdfDoc.context.obj({});
+        let bboxArr: [number, number, number, number] = [0, 0, vw, vh];
+
+        if (rawAp instanceof PDFContentStream) {
+          existingOps = rawAp.getContentsString();
+          if (existingOps.includes("/FHighlight gs")) continue;
+
+          const existingRes = rawAp.dict.lookupMaybe(PDFName.of("Resources"), PDFDict);
+          if (existingRes) {
+            for (const [rk, rv] of existingRes.entries()) {
+              resDict.set(rk, rv);
+            }
+          }
+          const bbox = rawAp.dict.lookupMaybe(PDFName.of("BBox"), PDFArray);
+          if (bbox && bbox.size() === 4) {
+            const nums = [0, 1, 2, 3].map((idx) => {
+              const v = bbox.lookup(idx);
+              return v instanceof PDFNumber ? v.asNumber() : 0;
+            });
+            bboxArr = [nums[0], nums[1], nums[2], nums[3]];
+          }
+        } else if (rawAp instanceof PDFRawStream) {
+          try {
+            const decoded = decodePDFRawStream(rawAp).decode();
+            existingOps = Buffer.from(decoded).toString("latin1");
+          } catch {
+            existingOps = Buffer.from(rawAp.contents).toString("latin1");
+          }
+          // Skip duplicating highlight if already injected in a prior pass
+          if (existingOps.includes("/FHighlight gs")) continue;
+
+          const existingRes = rawAp.dict.lookupMaybe(PDFName.of("Resources"), PDFDict);
+          if (existingRes) {
+            for (const [rk, rv] of existingRes.entries()) {
+              resDict.set(rk, rv);
+            }
+          }
+          const bbox = rawAp.dict.lookupMaybe(PDFName.of("BBox"), PDFArray);
+          if (bbox && bbox.size() === 4) {
+            const nums = [0, 1, 2, 3].map((idx) => {
+              const v = bbox.lookup(idx);
+              return v instanceof PDFNumber ? v.asNumber() : 0;
+            });
+            bboxArr = [nums[0], nums[1], nums[2], nums[3]];
           }
         }
-      }
 
-      const offRef = makeFormXObj("", w, h);
+        // Strip pdf-lib's default opaque white (1 1 1 rg) rectangle fill so printed artwork + our dim highlight tint show through cleanly
+        if (existingOps) {
+          existingOps = existingOps.replace(
+            /q\s*\r?\n1 1 1 rg[\s\S]*?\bh\s*\r?\nf\s*\r?\nQ\s*/g,
+            ""
+          );
+        }
 
-      let onOps: string;
-      if (w > 24) {
-        // Wide bordered text option box (e.g. [ RSA ID ], [ owner ], [ no odometer ]):
-        // Transparent inset blue highlight border + crisp top-right 'X' mark tucked into clear corner margin.
-        const pad = 1.2;
-        const x1 = roundPt(w - pad * 2);
-        const y1 = roundPt(h - pad * 2);
-        const isNarrowOption = w <= 50;
-        const markSize = isNarrowOption ? 4.2 : 7.5;
-        const markInsetRight = isNarrowOption ? 2.4 : 3.0;
-        const markInsetTop = isNarrowOption ? 2.4 : 2.5;
-        const mx1 = roundPt(w - markInsetRight);
-        const mx0 = roundPt(mx1 - markSize);
-        const my1 = roundPt(h - markInsetTop);
-        const my0 = roundPt(Math.max(2.5, my1 - markSize));
-        const markStroke = isNarrowOption ? "1.15 w" : "1.5 w";
-        onOps = [
+        const existingExtStates = resDict.lookupMaybe(PDFName.of("ExtGState"), PDFDict);
+        const extStates = pdfDoc.context.obj({});
+        if (existingExtStates) {
+          for (const [ek, ev] of existingExtStates.entries()) {
+            extStates.set(ek, ev);
+          }
+        }
+        extStates.set(PDFName.of("FHighlight"), hlGsRef);
+        resDict.set(PDFName.of("ExtGState"), extStates);
+
+        const bw = roundPt(Math.max(2, bboxArr[2] - bboxArr[0] - 0.6));
+        const bh = roundPt(Math.max(2, bboxArr[3] - bboxArr[1] - 0.6));
+        const bx = roundPt(bboxArr[0] + 0.3);
+        const by = roundPt(bboxArr[1] + 0.3);
+
+        const tickOps: string[] = [];
+        if (isComb && combCells >= 2 && combCells <= 40) {
+          const stepX = (bboxArr[2] - bboxArr[0]) / combCells;
+          tickOps.push("0.35 w");
+          for (let ci = 1; ci < combCells; ci++) {
+            const tx = roundPt(bboxArr[0] + ci * stepX);
+            tickOps.push(`${tx} ${by} m ${tx} ${roundPt(by + bh)} l`);
+          }
+          tickOps.push("S");
+        }
+
+        const highlightPrefix = [
           "q",
-          "0.06 0.24 0.62 RG",
-          "1.3 w",
-          `${pad} ${pad} ${x1} ${y1} re S`,
-          markStroke,
-          `${mx0} ${my0} m ${mx1} ${my1} l ${mx0} ${my1} m ${mx1} ${my0} l S`,
+          "/FHighlight gs",
+          "0.58 0.78 0.98 rg",
+          "0.42 0.60 0.85 RG",
+          "0.55 w",
+          `${bx} ${by} ${bw} ${bh} re B`,
+          ...tickOps,
           "Q",
         ].join("\n");
-      } else {
-        // Compact square checkbox / radio circle: centered 'X' with transparent background
-        const p = roundPt(Math.min(3.0, w * 0.2));
-        const rx = roundPt(w - p);
-        const ty = roundPt(h - p);
-        onOps = [
-          "q",
-          "0.06 0.14 0.36 RG",
-          "1.4 w",
-          `${p} ${p} m ${rx} ${ty} l ${p} ${ty} m ${rx} ${p} l S`,
-          "Q",
-        ].join("\n");
+
+        const mergedOps = existingOps.trim()
+          ? `${highlightPrefix}\n${existingOps}`
+          : highlightPrefix;
+        const newStream = pdfDoc.context.stream(mergedOps, {
+          Type: "XObject",
+          Subtype: "Form",
+          BBox: bboxArr,
+          Matrix: getRotationAppearanceMatrix(rot, vw, vh),
+          Resources: resDict,
+        });
+        const newRef = pdfDoc.context.register(newStream);
+
+        const targetApDict = apDict ?? pdfDoc.context.obj({});
+        targetApDict.set(PDFName.of("N"), newRef);
+        if (!apDict) widget.dict.set(PDFName.of("AP"), targetApDict);
       }
-
-      const onRef = makeFormXObj(onOps, w, h);
-      const apNormal = pdfDoc.context.obj({});
-      apNormal.set(onStateName, onRef);
-      apNormal.set(PDFName.of("Off"), offRef);
-
-      const apDict = pdfDoc.context.obj({});
-      apDict.set(PDFName.of("N"), apNormal);
-      widget.dict.set(PDFName.of("AP"), apDict);
     }
   }
 }
@@ -1047,6 +1319,7 @@ async function renderPdfNode(payload: {
   values: Record<string, unknown>;
   outputPdfPath: string;
   flatten?: boolean;
+  outputMode?: "fillable" | "flattened";
 }) {
   const bytes = fs.readFileSync(payload.templatePdfPath);
   const pdfDoc = await PDFDocument.load(bytes);
@@ -1256,9 +1529,13 @@ async function renderPdfNode(payload: {
       }
     }
   }
-  applyTransparentControlAppearances(pdfDoc, form);
+  applyDimHighlightAppearances(pdfDoc, form, font);
 
-  const shouldFlatten = payload.flatten !== false;
+  const shouldFlatten =
+    payload.outputMode === "fillable" ? false : payload.flatten !== false;
+  if (!shouldFlatten) {
+    form.acroForm.dict.set(PDFName.of("NeedAppearances"), pdfDoc.context.obj(false));
+  }
   if (shouldFlatten && form.getFields().length > 0) {
     try {
       form.flatten();
@@ -1566,6 +1843,7 @@ export async function runFormifyNodeEngine<T = unknown>(
           values: Record<string, unknown>;
           outputPdfPath: string;
           flatten?: boolean;
+          outputMode?: "fillable" | "flattened";
         }
       )) as T;
     case "validate-acroform":
