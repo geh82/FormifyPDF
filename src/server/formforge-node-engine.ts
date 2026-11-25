@@ -944,43 +944,54 @@ async function renderPdfNode(payload: {
         populatedWidgets++;
       }
     } else if (fld.type === "radio") {
-      const targetStr = String(rawVal).trim();
-      const matchedOpt =
-        fld.options.find((opt) => opt === targetStr) ??
-        fld.options.find((opt) => opt.toLowerCase() === targetStr.toLowerCase());
-      let targetBox = matchedOpt ? fld.optionRects?.[matchedOpt] : undefined;
-      if (!targetBox && matchedOpt && fld.options.length > 0) {
-        const idx = fld.options.indexOf(matchedOpt);
-        const sliceW = fld.rect.width / fld.options.length;
-        targetBox = {
-          x: fld.rect.x + idx * sliceW,
-          y: fld.rect.y,
-          width: sliceW,
-          height: fld.rect.height,
-        };
-      } else if (!targetBox && fld.optionRects) {
-        const directKey = Object.keys(fld.optionRects).find(
-          (k) => k.toLowerCase() === targetStr.toLowerCase()
-        );
-        if (directKey) targetBox = fld.optionRects[directKey];
-      }
-      if (targetBox) {
-        const [ox0, oy0, ox1, oy1] = topLeftPdfToBottomLeftPdf(
-          targetBox,
-          cropRect,
-          rot
-        );
-        const ow = ox1 - ox0;
-        const oh = oy1 - oy0;
-        const size = Math.max(8, Math.min(12, oh - 2));
-        page.drawText("X", {
-          x: ox0 + Math.max(1, (ow - font.widthOfTextAtSize("X", size)) / 2),
-          y: oy0 + Math.max(1, (oh - size * 0.75) / 2),
-          size,
-          font,
-          color: rgb(0.06, 0.1, 0.2),
-        });
+      // Determine if this is a marking circle (standalone, no options) or a radio button group
+      const isMarkingCircle = !fld.options || fld.options.length <= 1;
+      const isMarkingCircleBySize = fld.rect && fld.rect.width >= 6 && fld.rect.width <= 22 && fld.rect.height >= 6 && fld.rect.height <= 22;
+
+      if (isMarkingCircle && isMarkingCircleBySize) {
+        // Marking circle: do not draw the "X" marker, and note the circle for border removal
+        // The marking area will be left blank for user input; the original circle border
+        // will be removed during PDF content processing (see generateAcroFormNode).
         populatedWidgets++;
+      } else {
+        const targetStr = String(rawVal).trim();
+        const matchedOpt =
+          fld.options.find((opt) => opt === targetStr) ??
+          fld.options.find((opt) => opt.toLowerCase() === targetStr.toLowerCase());
+        let targetBox = matchedOpt ? fld.optionRects?.[matchedOpt] : undefined;
+        if (!targetBox && matchedOpt && fld.options.length > 0) {
+          const idx = fld.options.indexOf(matchedOpt);
+          const sliceW = fld.rect.width / fld.options.length;
+          targetBox = {
+            x: fld.rect.x + idx * sliceW,
+            y: fld.rect.y,
+            width: sliceW,
+            height: fld.rect.height,
+          };
+        } else if (!targetBox && fld.optionRects) {
+          const directKey = Object.keys(fld.optionRects).find(
+            (k) => k.toLowerCase() === targetStr.toLowerCase()
+          );
+          if (directKey) targetBox = fld.optionRects[directKey];
+        }
+        if (targetBox) {
+          const [ox0, oy0, ox1, oy1] = topLeftPdfToBottomLeftPdf(
+            targetBox,
+            cropRect,
+            rot
+          );
+          const ow = ox1 - ox0;
+          const oh = oy1 - oy0;
+          const size = Math.max(8, Math.min(12, oh - 2));
+          page.drawText("X", {
+            x: ox0 + Math.max(1, (ow - font.widthOfTextAtSize("X", size)) / 2),
+            y: oy0 + Math.max(1, (oh - size * 0.75) / 2),
+            size,
+            font,
+            color: rgb(0.06, 0.1, 0.2),
+          });
+          populatedWidgets++;
+        }
       }
     } else if (fld.cellRects && fld.cellRects.length > 0) {
       let str = toWinAnsiSafeText(String(rawVal)).trim();
