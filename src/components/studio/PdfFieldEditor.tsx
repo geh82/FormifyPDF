@@ -15,6 +15,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
+  Download,
   FilePlus2,
   Maximize2,
   MousePointer,
@@ -33,22 +34,22 @@ import {
   pdfRectToViewportPx,
   roundPt,
   viewportPxToPdfRect,
-} from "../../lib/formforge/coordinate.ts";
+} from "../../lib/formifypdf/coordinate.ts";
 import type {
   ConfidenceTier,
   DetectedFormField,
   FieldManifest,
-  FormForgeFieldType,
+  FormifyFieldType,
   PdfRect,
   ReviewStatus,
-} from "../../lib/formforge/types.ts";
+} from "../../lib/formifypdf/types.ts";
 import type { StudioApiClient } from "./studio-api.ts";
 
 if (typeof window !== "undefined" && pdfjsLib.GlobalWorkerOptions) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
 }
 
-const ALL_FIELD_TYPES: FormForgeFieldType[] = [
+const ALL_FIELD_TYPES: FormifyFieldType[] = [
   "text",
   "multiline",
   "numeric",
@@ -98,6 +99,7 @@ export function PdfFieldEditor({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
+  const loadingTaskRef = useRef<pdfjsLib.PDFDocumentLoadingTask | null>(null);
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
 
   const [manifest, setManifest] = useState<FieldManifest | null>(null);
@@ -159,14 +161,19 @@ export function PdfFieldEditor({
         // Load PDF.js document
         try {
           if (pdfDocRef.current) {
-            const prevClosable = pdfDocRef.current as unknown as { destroy?: () => Promise<void> };
-            await prevClosable.destroy?.();
+            await Promise.resolve(pdfDocRef.current.cleanup?.()).catch(() => {});
+            pdfDocRef.current = null;
+          }
+          if (loadingTaskRef.current) {
+            await Promise.resolve(loadingTaskRef.current.destroy?.()).catch(() => {});
+            loadingTaskRef.current = null;
           }
           const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice() });
+          loadingTaskRef.current = loadingTask;
           const doc = await loadingTask.promise;
           if (!active) {
-            const closable = doc as unknown as { destroy?: () => Promise<void> };
-            await closable.destroy?.();
+            await Promise.resolve(doc.cleanup?.()).catch(() => {});
+            await Promise.resolve(loadingTask.destroy?.()).catch(() => {});
             return;
           }
           pdfDocRef.current = doc;
@@ -191,6 +198,14 @@ export function PdfFieldEditor({
         } catch {
           // ignore
         }
+      }
+      if (pdfDocRef.current) {
+        void Promise.resolve(pdfDocRef.current.cleanup?.()).catch(() => {});
+        pdfDocRef.current = null;
+      }
+      if (loadingTaskRef.current) {
+        void Promise.resolve(loadingTaskRef.current.destroy?.()).catch(() => {});
+        loadingTaskRef.current = null;
       }
     };
   }, [api, documentId, documentTitle]);
@@ -586,6 +601,38 @@ export function PdfFieldEditor({
     }
   };
 
+  const handleDownloadAcroForm = async () => {
+    if (dirty) {
+      const saved = await handleSaveManifest();
+      if (!saved) return;
+      await handleGenerateAcroForm();
+    }
+    setErrorMsg(null);
+    try {
+      const slug =
+        documentTitle
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "") || "document";
+      const file = await api.fetchFileWithFilename(
+        `/api/v1/documents/${documentId}/acroform-pdf?disposition=attachment`,
+        `${slug}-fillable-acroform.pdf`
+      );
+      const blobUrl = URL.createObjectURL(
+        new Blob([file.bytes.slice()], { type: file.contentType })
+      );
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = file.filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 2500);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to download AcroForm PDF");
+    }
+  };
+
   const handleGenerateAcroForm = async () => {
     if (dirty) {
       const saved = await handleSaveManifest();
@@ -875,6 +922,14 @@ export function PdfFieldEditor({
               </button>
               <button
                 type="button"
+                onClick={() => void handleDownloadAcroForm()}
+                className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0"
+              >
+                <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                Download AcroForm
+              </button>
+              <button
+                type="button"
                 onClick={() => setShowTplForm((s) => !s)}
                 className="inline-flex items-center gap-1.5 rounded-md border border-emerald-800 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-900 hover:bg-emerald-100 whitespace-nowrap"
               >
@@ -882,6 +937,16 @@ export function PdfFieldEditor({
                 Save as Template
               </button>
             </>
+          )}
+          {!canEdit && (
+            <button
+              type="button"
+              onClick={() => void handleDownloadAcroForm()}
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0"
+            >
+              <Download className="h-3.5 w-3.5" aria-hidden="true" />
+              Download AcroForm
+            </button>
           )}
         </div>
       </div>
@@ -1180,7 +1245,7 @@ export function PdfFieldEditor({
                       value={primarySelectedField.type}
                       onChange={(e) =>
                         updateSelectedField({
-                          type: e.target.value as FormForgeFieldType,
+                          type: e.target.value as FormifyFieldType,
                           multiline: e.target.value === "multiline",
                         })
                       }

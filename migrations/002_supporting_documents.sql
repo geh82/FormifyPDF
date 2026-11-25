@@ -1,4 +1,4 @@
--- FormForge AI Relational Schema (SQLite Runtime Migration 002)
+-- FormifyPDF Relational Schema (SQLite Runtime Migration 002)
 -- Adds supporting_documents table for PDF and image attachments linked to documents or rendered outputs.
 PRAGMA foreign_keys = ON;
 

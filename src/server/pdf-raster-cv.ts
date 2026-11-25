@@ -3,7 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createCanvas, DOMMatrix, Path2D } from "@napi-rs/canvas";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
-import { imagePxToTopLeftPdf, roundPt } from "../lib/formforge/coordinate.ts";
+import { imagePxToTopLeftPdf, roundPt } from "../lib/formifypdf/coordinate.ts";
 import type {
   ExtractedCirclePrimitive,
   ExtractedLineSegment,
@@ -235,12 +235,15 @@ export async function renderPdfPageGray(
   dpi = 180
 ): Promise<RasterPageImage> {
   const bytes = new Uint8Array(fs.readFileSync(pdfPath));
-  const pdfjsDoc = await pdfjsLib.getDocument(getPdfJsDocumentOptions(bytes)).promise;
+  const loadingTask = pdfjsLib.getDocument(getPdfJsDocumentOptions(bytes));
+  let pdfjsDoc: pdfjsLib.PDFDocumentProxy | null = null;
   try {
+    pdfjsDoc = await loadingTask.promise;
     const page = await pdfjsDoc.getPage(pageIndex + 1);
     return await renderPdfJsPageGray(page, dpi);
   } finally {
-    await pdfjsDoc.cleanup();
+    await Promise.resolve(pdfjsDoc?.cleanup?.()).catch(() => {});
+    await Promise.resolve(loadingTask.destroy?.()).catch(() => {});
   }
 }
 
@@ -253,13 +256,16 @@ export async function renderPdfPagePngBuffer(
   dpi = 150
 ): Promise<{ png: Buffer; width: number; height: number }> {
   const bytes = new Uint8Array(fs.readFileSync(pdfPath));
-  const pdfjsDoc = await pdfjsLib.getDocument(getPdfJsDocumentOptions(bytes)).promise;
+  const loadingTask = pdfjsLib.getDocument(getPdfJsDocumentOptions(bytes));
+  let pdfjsDoc: pdfjsLib.PDFDocumentProxy | null = null;
   try {
+    pdfjsDoc = await loadingTask.promise;
     const page = await pdfjsDoc.getPage(pageIndex + 1);
     const { canvas, width, height } = await renderPdfJsPageToCanvas(page, dpi);
     return { png: canvas.toBuffer("image/png"), width, height };
   } finally {
-    await pdfjsDoc.cleanup();
+    await Promise.resolve(pdfjsDoc?.cleanup?.()).catch(() => {});
+    await Promise.resolve(loadingTask.destroy?.()).catch(() => {});
   }
 }
 
@@ -273,11 +279,13 @@ export async function renderPageThumbnails(
   dpi = 100
 ): Promise<Array<string | null>> {
   const results = new Array<string | null>(pageCount).fill(null);
+  let loadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null;
   let pdfjsDoc: pdfjsLib.PDFDocumentProxy | null = null;
   try {
     fs.mkdirSync(outDir, { recursive: true });
     const bytes = new Uint8Array(fs.readFileSync(pdfPath));
-    pdfjsDoc = await pdfjsLib.getDocument(getPdfJsDocumentOptions(bytes)).promise;
+    loadingTask = pdfjsLib.getDocument(getPdfJsDocumentOptions(bytes));
+    pdfjsDoc = await loadingTask.promise;
 
     const total = Math.min(pageCount, pdfjsDoc.numPages);
     for (let i = 0; i < total; i++) {
@@ -290,9 +298,8 @@ export async function renderPageThumbnails(
   } catch {
     // Non-fatal: thumbnails are optional visual aids
   } finally {
-    if (pdfjsDoc) {
-      await pdfjsDoc.cleanup().catch(() => {});
-    }
+    await Promise.resolve(pdfjsDoc?.cleanup?.()).catch(() => {});
+    await Promise.resolve(loadingTask?.destroy?.()).catch(() => {});
   }
   return results;
 }

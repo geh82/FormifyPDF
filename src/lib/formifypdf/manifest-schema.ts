@@ -7,7 +7,7 @@ export const PdfRectSchema = z.object({
   height: z.number().finite().positive(),
 });
 
-export const FormForgeFieldTypeSchema = z.enum([
+export const FormifyFieldTypeSchema = z.enum([
   "text",
   "multiline",
   "numeric",
@@ -63,7 +63,7 @@ export const DetectedFormFieldSchema = z.object({
     .max(120)
     .regex(/^[a-zA-Z0-9_.-]+$/, "Field name may only contain letters, digits, _, ., -"),
   label: z.string().min(1).max(200),
-  type: FormForgeFieldTypeSchema,
+  type: FormifyFieldTypeSchema,
   page: z.number().int().min(0),
   rect: PdfRectSchema,
   originalDetectedRect: PdfRectSchema.nullish().transform((v) => v ?? undefined),

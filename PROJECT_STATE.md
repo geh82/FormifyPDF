@@ -1,10 +1,10 @@
-# FormForge — Project State & Resume Log
+# FormifyPDF — Project State & Resume Log
 
 > This file is maintained as a session-resume checkpoint. If work is interrupted, read this file first to pick up exactly where we left off.
 
 ## Current Session Context
 - **Platform:** Windows (PowerShell)
-- **Working Directory:** `c:\Projects\FormForge`
+- **Working Directory:** `c:\Projects\FormifyPDF`
 - **Git Branch:** `main` (up to date with `origin/main`)
 - **Latest Commit:** `390d616a9c4e95eb5e95143979362d5eb90f9825`
 - **TypeScript:** Compiles clean (`npx tsc --noEmit` passes)
@@ -20,11 +20,11 @@
 | PDF Structural Extraction | `src/server/pdf-vector-extractor.ts` | pdfjs-dist → lines, rects, circles, text runs |
 | Raster CV Pipeline | `src/server/pdf-raster-cv.ts` | Render → binarize → deskew → contour extraction → BMP |
 | Local OCR | `src/server/pdf-local-ocr.ts` | Tesseract.js OCR on rasterized pages |
-| Fusion & Classification | `src/server/formforge-fusion.ts` | `fuseAndClassifyPageGeometry`, `clusterCharCells`, `findBestAssociatedLabel` |
-| Node AcroForm Engine | `src/server/formforge-node-engine.ts` | `analyzePdfNode`, `generateAcroFormNode`, `renderPdfNode`, `validateAcroFormNode` |
-| Coordinate Transform | `src/lib/formforge/coordinate.ts` | Top-left PDF ↔ bottom-left PDF ↔ image pixel transforms |
-| Types | `src/lib/formforge/types.ts` | FieldManifest, DetectedFormField, AcroFormValidationReport schemas |
-| Python Engine | `python/formforge_engine.py` | PyMuPDF + pdfplumber + OpenCV + Tesseract (Engine A) |
+| Fusion & Classification | `src/server/formifypdf-fusion.ts` | `fuseAndClassifyPageGeometry`, `clusterCharCells`, `findBestAssociatedLabel` |
+| Node AcroForm Engine | `src/server/formifypdf-node-engine.ts` | `analyzePdfNode`, `generateAcroFormNode`, `renderPdfNode`, `validateAcroFormNode` |
+| Coordinate Transform | `src/lib/formifypdf/coordinate.ts` | Top-left PDF ↔ bottom-left PDF ↔ image pixel transforms |
+| Types | `src/lib/formifypdf/types.ts` | FieldManifest, DetectedFormField, AcroFormValidationReport schemas |
+| Python Engine | `python/formifypdf_engine.py` | PyMuPDF + pdfplumber + OpenCV + Tesseract (Engine A) |
 
 ### Root Cause: ~2% Detection Rate
 `fuseAndClassifyPageGeometryCore` only emits fields when strict conditions met:
@@ -47,7 +47,7 @@
 
 ## Modified Files (Uncommitted — from Prior Session)
 
-### `src/server/formforge-fusion.ts`
+### `src/server/formifypdf-fusion.ts`
 `clusterCharCells` tolerance thresholds relaxed (y0: 4→5, height: 4→5, width: 4→7)
 
 ### `src/server/pdf-raster-cv.ts`
@@ -146,7 +146,7 @@ npx vitest run tests/benchmark/detection-benchmark.test.ts -t "Scenario 3"
 npm test
 
 # View git diff
-git diff src/server/formforge-fusion.ts src/server/pdf-raster-cv.ts
+git diff src/server/formifypdf-fusion.ts src/server/pdf-raster-cv.ts
 ```
 
 ---

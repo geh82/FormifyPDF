@@ -16,9 +16,9 @@
 |---|---|---|
 | Authentication & Sessions | `src/server/v1Routes.ts` | Accepts credentials strictly via `Authorization: Bearer` or `X-API-Key` headers (rejecting `?token=` query parameters with `401`), hashes tokens and passwords safely, and uses one-time first-run admin setup when no env admin passcode is configured. |
 | Database Queries | `src/server/v1Routes.ts` | All SQLite queries use parameterized placeholders (`?`) and explicit `BEGIN` / `COMMIT` / `ROLLBACK` transactions for multi-step writes. |
-| File Upload Validation | `src/server/formforge-storage.ts` | Verifies `%PDF-` / `%%EOF` trailers on PDFs and checks PNG, JPEG, WebP, and PDF magic bytes + declared MIME types + extensions before writing files, with `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment` on downloads. |
-| Path Traversal Prevention | `src/server/formforge-storage.ts` | Rejects null bytes, absolute paths, `..` segments, and unapproved buckets, and verifies resolved paths stay strictly inside the storage root. |
-| Error Handling & PII Redaction | `src/server/formforge-node-engine.ts` | Overflow and validation errors report character count limits without echoing sensitive field values back in error responses or logs. |
+| File Upload Validation | `src/server/formifypdf-storage.ts` | Verifies `%PDF-` / `%%EOF` trailers on PDFs and checks PNG, JPEG, WebP, and PDF magic bytes + declared MIME types + extensions before writing files, with `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment` on downloads. |
+| Path Traversal Prevention | `src/server/formifypdf-storage.ts` | Rejects null bytes, absolute paths, `..` segments, and unapproved buckets, and verifies resolved paths stay strictly inside the storage root. |
+| Error Handling & PII Redaction | `src/server/formifypdf-node-engine.ts` | Overflow and validation errors report character count limits without echoing sensitive field values back in error responses or logs. |
 | Dependencies | `package.json` | Audited 362 packages with `bun audit` — 0 known vulnerabilities found. |
 
 ## PoC Verification
@@ -39,7 +39,7 @@ Document identifiers and optional tenant identifiers are validated against stric
 | Step | What Happens in the Code | Outcome |
 |---|---|---|
 | 1 | `GET /api/generated/..%2F..%2Fpackage.json/download` arrives at the legacy download handler and `provider.saveGeneratedPdf("../evil", buf)` is invoked in tests. | Enters validation |
-| 2 | `assertValidDocumentId` (`src/lib/storage/storage.ts:83`) and `assertConfinedPath` (`src/lib/storage/storage.ts:137`) reject `..` and non-matching IDs before any filesystem operation runs; `isRegularNonSymlinkFile` (`src/server/formforge-storage.ts`) rejects symlinked targets. | Blocked before disk access |
+| 2 | `assertValidDocumentId` (`src/lib/storage/storage.ts:83`) and `assertConfinedPath` (`src/lib/storage/storage.ts:137`) reject `..` and non-matching IDs before any filesystem operation runs; `isRegularNonSymlinkFile` (`src/server/formifypdf-storage.ts`) rejects symlinked targets. | Blocked before disk access |
 | 3 | HTTP request returns `404` and storage call rejects with `"Invalid document identifier"`; symlinked reads return `null`. | **Handled Safely** |
 
 #### Conclusion

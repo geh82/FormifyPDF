@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
-import type { RoleName } from "../lib/formforge/types.ts";
+import type { RoleName } from "../lib/formifypdf/types.ts";
 import { getDatabase, getRolePermissions } from "./db/database.ts";
 
 export interface AuthenticatedPrincipal {
@@ -46,7 +46,7 @@ export function isAdminBootstrapped(): boolean {
       "SELECT COUNT(*) as cnt FROM users WHERE role_name = 'administrator' AND is_active = 1"
     )
     .get() as { cnt: number };
-  return row.cnt > 0 || Boolean((process.env.FORMFORGE_ADMIN_PASSWORD || "").trim());
+  return row.cnt > 0 || Boolean((process.env.FORMIFYPDF_ADMIN_PASSWORD || "").trim());
 }
 
 export function hasAnyAdminUserInDb(): boolean {
@@ -95,7 +95,7 @@ export function createSessionForUser(
   req?: Request
 ): { token: string; expiresAt: string; sessionId: string } {
   const db = getDatabase();
-  const rawToken = `ffs_${crypto.randomBytes(32).toString("hex")}`;
+  const rawToken = `fps_${crypto.randomBytes(32).toString("hex")}`;
   const tokenHash = hashToken(rawToken);
   const sessionId = `sess_${crypto.randomBytes(10).toString("hex")}`;
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
@@ -121,7 +121,8 @@ export function createSessionForUser(
 }
 
 export function resolvePrincipalFromRequest(
-  req: Request
+  req: Request,
+  options?: { skipTouchApiKey?: boolean }
 ): AuthenticatedPrincipal | null {
   const db = getDatabase();
   const authHeader = req.headers.authorization || "";
@@ -133,9 +134,9 @@ export function resolvePrincipalFromRequest(
     rawBearer = authHeader.slice(7).trim();
   }
 
-  // 1. Check API Key (X-API-Key or Bearer ffk_...)
+  // 1. Check API Key (X-API-Key or Bearer fpk_...)
   const candidateApiKey =
-    apiKeyHeader.trim() || (rawBearer.startsWith("ffk_") ? rawBearer : "");
+    apiKeyHeader.trim() || (rawBearer.startsWith("fpk_") ? rawBearer : "");
   if (candidateApiKey) {
     const keyHash = hashToken(candidateApiKey);
     const keyRow = db
@@ -156,9 +157,11 @@ export function resolvePrincipalFromRequest(
 
     if (!keyRow) return null;
 
-    db.prepare("UPDATE api_keys SET last_used_at = datetime('now') WHERE id = ?").run(
-      keyRow.id
-    );
+    if (!options?.skipTouchApiKey) {
+      db.prepare("UPDATE api_keys SET last_used_at = datetime('now') WHERE id = ?").run(
+        keyRow.id
+      );
+    }
 
     let scopes: string[] = [];
     try {
@@ -182,7 +185,7 @@ export function resolvePrincipalFromRequest(
     };
   }
 
-  // 2. Check User Session Token (Bearer ffs_...)
+  // 2. Check User Session Token (Bearer fps_...)
   const sessionToken = rawBearer;
   if (!sessionToken) return null;
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FormForge AI — Universal PDF Intelligence, OCR, Computer Vision, AcroForm Generation & Rendering Engine.
+FormifyPDF — Universal PDF Intelligence, OCR, Computer Vision, AcroForm Generation & Rendering Engine.
 
 Self-hosted, zero-form-specific-assumption engine using PyMuPDF (fitz), pdfplumber, pypdf, OpenCV,
 Pillow, and Tesseract OCR.
@@ -42,7 +42,7 @@ from pypdf.generic import (
 import pytesseract
 
 
-ENGINE_VERSION = "formforge-universal-1.0.0"
+ENGINE_VERSION = "formifypdf-universal-1.0.0"
 
 PAPER_SIZES = [
     ("A4", 595.28, 841.89),
@@ -1153,6 +1153,8 @@ def validate_acroform_pdf(
 
         fields_dict = reader.get_fields() or {}
         widget_names = list(fields_dict.keys())
+        widgets_seen = 0
+        widgets_with_ap = 0
         # Also inspect page-level widget annotations if get_fields returned partial tree
         for p in reader.pages:
             annots = p.get("/Annots") or []
@@ -1161,15 +1163,22 @@ def validate_acroform_pdf(
             for ref in annots or []:
                 obj = ref.get_object() if hasattr(ref, "get_object") else ref
                 if isinstance(obj, dict) and str(obj.get("/Subtype", "")) == "/Widget":
+                    widgets_seen += 1
                     if obj.get("/AP"):
-                        appearance_ok = True
+                        widgets_with_ap += 1
                     tname = obj.get("/T")
                     if tname and str(tname) not in widget_names:
                         widget_names.append(str(tname))
 
+        if widgets_seen > 0:
+            appearance_ok = widgets_with_ap == widgets_seen
+            if not appearance_ok:
+                warnings.append(
+                    f"{widgets_seen - widgets_with_ap} widget(s) missing /AP appearance stream; /NeedAppearances enabled."
+                )
+
         # Round-trip write & read verification via pypdf in memory
         if widget_names:
-            appearance_ok = True
             writer = PdfWriter()
             writer.append(reader)
             first_text = next(
@@ -1530,6 +1539,31 @@ def generate_acroform_pdf(
     }
 
 
+def _flatten_render_values(values: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for raw_key, val in (values or {}).items():
+        dotted = f"{prefix}.{raw_key}" if prefix else str(raw_key)
+        if isinstance(val, dict):
+            out.update(_flatten_render_values(val, dotted))
+        else:
+            out[dotted] = val
+            underscored = dotted.replace(".", "_")
+            if underscored not in out:
+                out[underscored] = val
+    return out
+
+
+def _resolve_field_value(fld: Dict[str, Any], flat_values: Dict[str, Any]) -> Any:
+    fname = str(fld.get("name") or "")
+    fid = str(fld.get("id") or "")
+    orig_label = str(fld.get("originalLabelText") or "")
+    dotted = fname.replace("_", ".") if fname else ""
+    for candidate in (fname, fid, orig_label, dotted):
+        if candidate and candidate in flat_values and flat_values[candidate] is not None:
+            return flat_values[candidate]
+    return None
+
+
 def render_filled_pdf(
     template_pdf_path: str,
     manifest: Dict[str, Any],
@@ -1539,18 +1573,23 @@ def render_filled_pdf(
 ) -> Dict[str, Any]:
     os.makedirs(os.path.dirname(os.path.abspath(output_pdf_path)), exist_ok=True)
     fields = manifest.get("fields", [])
-    fields_by_name = {str(f.get("name")): f for f in fields}
+    flat_values = _flatten_render_values(values or {})
 
-    # Pre-expand char_cells into {name}_cell_{i}
-    expanded_values: Dict[str, Any] = {}
-    for k, v in values.items():
-        expanded_values[str(k)] = v
-        fdef = fields_by_name.get(str(k))
-        if fdef and fdef.get("type") == "char_cells":
-            sval = str(v or "")
+    # Pre-expand char_cells and resolved values by widget name
+    expanded_values: Dict[str, Any] = dict(flat_values)
+    for fdef in fields:
+        fname = str(fdef.get("name") or "")
+        if not fname:
+            continue
+        resolved = _resolve_field_value(fdef, flat_values)
+        if resolved is None:
+            continue
+        expanded_values[fname] = resolved
+        if fdef.get("type") == "char_cells":
+            sval = str(resolved or "")
             cells = fdef.get("cellRects") or []
             for ci in range(len(cells)):
-                expanded_values[f"{k}_cell_{ci}"] = sval[ci] if ci < len(sval) else ""
+                expanded_values[f"{fname}_cell_{ci}"] = sval[ci] if ci < len(sval) else ""
 
     populated_count = 0
 
@@ -1610,10 +1649,8 @@ def render_filled_pdf(
                 page = doc[page_idx]
                 fname = str(fld.get("name") or "")
                 ftype = str(fld.get("type", "text"))
-                if fname not in values:
-                    continue
-                val = values.get(fname)
-                if val is None:
+                val = _resolve_field_value(fld, flat_values)
+                if val is None or val == "":
                     continue
 
                 cell_rects = fld.get("cellRects") or []
@@ -1706,7 +1743,7 @@ def render_filled_pdf(
 
 def main():
     if len(sys.argv) < 4:
-        sys.stderr.write("Usage: formforge_engine.py <command> <input_json> <output_json>\n")
+        sys.stderr.write("Usage: formifypdf_engine.py <command> <input_json> <output_json>\n")
         sys.exit(2)
 
     command = sys.argv[1]

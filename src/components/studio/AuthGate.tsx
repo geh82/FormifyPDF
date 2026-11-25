@@ -13,9 +13,9 @@ export function AuthGate({ api, authStatus, onAuthenticated }: AuthGateProps) {
     authStatus.requiresFirstRunSetup ? "setup" : "login"
   );
 
-  const [email, setEmail] = useState("admin@formforge.local");
+  const [email, setEmail] = useState("admin@formifypdf.local");
   const [fullName, setFullName] = useState("Workspace Administrator");
-  const [orgName, setOrgName] = useState("FormForge Workspace");
+  const [orgName, setOrgName] = useState("FormifyPDF Workspace");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
 
@@ -136,10 +136,10 @@ export function AuthGate({ api, authStatus, onAuthenticated }: AuthGateProps) {
         )}
         <h2 className="text-lg font-semibold text-slate-900">
           {mode === "setup"
-            ? "Claim FormForge AI Administrator"
+            ? "Claim FormifyPDF Administrator"
             : mode === "reset"
             ? "Reset Account Password"
-            : "Sign In to FormForge AI Studio"}
+            : "Sign In to FormifyPDF Studio"}
         </h2>
       </div>
       <p className="text-xs text-slate-600 leading-relaxed mb-5">

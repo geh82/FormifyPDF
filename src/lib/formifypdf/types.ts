@@ -1,4 +1,4 @@
-export type FormForgeFieldType =
+export type FormifyFieldType =
   | "text"
   | "multiline"
   | "numeric"
@@ -91,7 +91,7 @@ export interface DetectedFormField {
   id: string;
   name: string;
   label: string;
-  type: FormForgeFieldType;
+  type: FormifyFieldType;
   page: number;
   rect: PdfRect;
   /** Original raw detected bounding box before clamping/snapping */

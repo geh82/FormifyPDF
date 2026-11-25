@@ -4,9 +4,9 @@ import path from "node:path";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { computeRectIoU } from "../../src/lib/formforge/coordinate.ts";
-import type { AcroFormValidationReport, DetectedFormField, FieldManifest, PdfRect } from "../../src/lib/formforge/types.ts";
-import { runFormForgeNodeEngine } from "../../src/server/formforge-node-engine.ts";
+import { computeRectIoU } from "../../src/lib/formifypdf/coordinate.ts";
+import type { AcroFormValidationReport, DetectedFormField, FieldManifest, PdfRect } from "../../src/lib/formifypdf/types.ts";
+import { runFormifyNodeEngine } from "../../src/server/formifypdf-node-engine.ts";
 import { renderPdfPagePngBuffer } from "../../src/server/pdf-raster-cv.ts";
 
 interface BenchmarkTarget {
@@ -130,11 +130,11 @@ function loadBenchmarkGroundTruth(pageFilter?: number): BenchmarkTarget[] {
   return targets;
 }
 
-describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
+describe("FormifyPDF Universal Detection & AcroForm Benchmark Suite", () => {
   let tmpDir: string;
 
   beforeAll(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "formforge-bench-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "formifypdf-bench-"));
   });
 
   afterAll(() => {
@@ -143,7 +143,7 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
 
   it("Scenario 1: Digital multi-page government form achieves >=95% recall, >=0.85 mean IoU, and preserves comb char grids", async () => {
     const benchPdf = path.resolve(process.cwd(), "tests/benchmark/fixtures/bench_form.pdf");
-    const out = await runFormForgeNodeEngine<{
+    const out = await runFormifyNodeEngine<{
       manifest: FieldManifest;
       ocrJobs: any[];
     }>("analyze", {
@@ -183,7 +183,7 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
     const scanPdf = path.join(tmpDir, "bench_p1_scanned.pdf");
     fs.writeFileSync(scanPdf, Buffer.from(await scanDoc.save()));
 
-    const out = await runFormForgeNodeEngine<{
+    const out = await runFormifyNodeEngine<{
       manifest: FieldManifest;
       ocrJobs: Array<{ wordCount: number; ocrEngine: string; status: string }>;
     }>("analyze", {
@@ -251,7 +251,7 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
     const skewedPdf = path.join(tmpDir, "skewed_scan.pdf");
     fs.writeFileSync(skewedPdf, Buffer.from(await skewedPdfDoc.save()));
 
-    const out = await runFormForgeNodeEngine<{ manifest: FieldManifest }>("analyze", {
+    const out = await runFormifyNodeEngine<{ manifest: FieldManifest }>("analyze", {
       pdfPath: skewedPdf,
       options: { documentId: "bench_skewed", dpi: 150 },
     });
@@ -352,7 +352,7 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
     const mixedPdfPath = path.join(tmpDir, "unfamiliar_mixed.pdf");
     fs.writeFileSync(mixedPdfPath, Buffer.from(await doc.save()));
 
-    const analysis = await runFormForgeNodeEngine<{ manifest: FieldManifest }>("analyze", {
+    const analysis = await runFormifyNodeEngine<{ manifest: FieldManifest }>("analyze", {
       pdfPath: mixedPdfPath,
       options: { documentId: "bench_mixed" },
     });
@@ -391,7 +391,7 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
 
     // Generate genuine AcroForm + verify visual alignment + interactive fill/roundtrip
     const acroOutPath = path.join(tmpDir, "unfamiliar_acroform.pdf");
-    const gen = await runFormForgeNodeEngine<{
+    const gen = await runFormifyNodeEngine<{
       createdWidgets: number;
       validation: AcroFormValidationReport;
     }>("generate-acroform", {

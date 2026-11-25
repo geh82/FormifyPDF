@@ -4,7 +4,7 @@ import {
   imagePxToTopLeftPdf,
   roundPt,
   topLeftPdfToBottomLeftPdf,
-} from "../lib/formforge/coordinate.ts";
+} from "../lib/formifypdf/coordinate.ts";
 import type {
   CharGridMetadata,
   ConfidenceTier,
@@ -13,12 +13,12 @@ import type {
   DetectionSummary,
   FieldManifest,
   FieldValidationRule,
-  FormForgeFieldType,
+  FormifyFieldType,
   PdfRect,
   VisualAlignmentIssue,
   VisualOverlapWarning,
   VisualVerificationReport,
-} from "../lib/formforge/types.ts";
+} from "../lib/formifypdf/types.ts";
 import {
   buildMergedTextLabels,
   clusterCharCells,
@@ -27,7 +27,7 @@ import {
   fuseAndClassifyPageGeometry,
   inferSemanticType,
   snakeCase,
-} from "./formforge-fusion.ts";
+} from "./formifypdf-fusion.ts";
 import type {
   ExtractedCirclePrimitive,
   ExtractedLineSegment,

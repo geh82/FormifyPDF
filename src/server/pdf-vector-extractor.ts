@@ -1,5 +1,5 @@
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
-import type { PdfRect } from "../lib/formforge/types.ts";
+import type { PdfRect } from "../lib/formifypdf/types.ts";
 
 export interface ExtractedLineSegment {
   x0: number;

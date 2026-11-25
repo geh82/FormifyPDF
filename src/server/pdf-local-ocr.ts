@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createWorker } from "tesseract.js";
-import { imagePxToTopLeftPdf, roundPt } from "../lib/formforge/coordinate.ts";
+import { imagePxToTopLeftPdf, roundPt } from "../lib/formifypdf/coordinate.ts";
 import type { ExtractedTextRun } from "./pdf-vector-extractor.ts";
 
 export interface LocalOcrPageOutput {

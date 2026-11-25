@@ -6,16 +6,16 @@ import type {
   DocumentPageInfo,
   FieldManifest,
   JobStage,
-} from "../lib/formforge/types.ts";
+} from "../lib/formifypdf/types.ts";
 import { logAuditEvent } from "./auth.ts";
 import { getDatabase } from "./db/database.ts";
-import { runFormForgePythonEngine } from "./formforge-runner.ts";
+import { runFormifyPythonEngine } from "./formifypdf-runner.ts";
 import {
   ensureStorageDirs,
   readStorageBuffer,
   resolveSafeStoragePath,
   saveStorageBuffer,
-} from "./formforge-storage.ts";
+} from "./formifypdf-storage.ts";
 
 interface AnalyzeEngineOutput {
   inspection: {
@@ -51,7 +51,7 @@ const activeQueue: string[] = [];
 let runningCount = 0;
 const MAX_CONCURRENCY = Math.max(
   1,
-  Number(process.env.FORMFORGE_WORKER_CONCURRENCY || "2")
+  Number(process.env.FORMIFYPDF_WORKER_CONCURRENCY || "2")
 );
 
 function updateJobStage(
@@ -66,6 +66,48 @@ function updateJobStage(
     SET stage = ?, progress_pct = ?, status = ?, updated_at = datetime('now')
     WHERE id = ?
   `).run(stage, progressPct, status, jobId);
+}
+
+export function recoverStaleJobs(): number {
+  const db = getDatabase();
+  const stale = db
+    .prepare(
+      "SELECT id, document_id FROM analysis_jobs WHERE status IN ('queued', 'running')"
+    )
+    .all() as Array<{ id: string; document_id: string }>;
+
+  if (stale.length === 0) return 0;
+
+  db.exec("BEGIN IMMEDIATE;");
+  try {
+    db.prepare(`
+      UPDATE analysis_jobs
+      SET status = 'failed',
+          stage = 'failed',
+          error_code = 'SERVER_RESTARTED',
+          error_message = 'Server restarted before analysis completed',
+          completed_at = datetime('now'),
+          updated_at = datetime('now')
+      WHERE status IN ('queued', 'running')
+    `).run();
+
+    db.prepare(`
+      UPDATE documents
+      SET status = 'error', updated_at = datetime('now')
+      WHERE status = 'analysing'
+        AND id IN (SELECT document_id FROM analysis_jobs WHERE error_code = 'SERVER_RESTARTED')
+    `).run();
+
+    db.exec("COMMIT;");
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK;");
+    } catch {
+      // ignore
+    }
+    throw err;
+  }
+  return stale.length;
 }
 
 export function enqueueAnalysisJob(jobId: string) {
@@ -145,7 +187,7 @@ export async function processAnalysisJob(jobId: string): Promise<void> {
     // Run real Python inspection + CV + OCR + semantic classification
     updateJobStage(jobId, "analysing_layout", 45, "running");
 
-    const engineOut = await runFormForgePythonEngine<AnalyzeEngineOutput>(
+    const engineOut = await runFormifyPythonEngine<AnalyzeEngineOutput>(
       "analyze",
       {
         pdfPath: sourcePath,
@@ -182,8 +224,11 @@ export async function processAnalysisJob(jobId: string): Promise<void> {
 
     updateJobStage(jobId, "generating_manifest", 75, "running");
 
-    // Persist inspected pages
-    db.exec("BEGIN;");
+    let manifestId = "";
+    let manifest: FieldManifest;
+
+    // Persist inspected pages & manifest atomically inside transaction
+    db.exec("BEGIN IMMEDIATE;");
     try {
       db.prepare("DELETE FROM document_pages WHERE document_id = ?").run(
         jobRow.document_id
@@ -221,7 +266,7 @@ export async function processAnalysisJob(jobId: string): Promise<void> {
         );
       }
 
-      const manifest: FieldManifest = {
+      manifest = {
         ...engineOut.manifest,
         documentId: jobRow.document_id,
         generatedAt: new Date().toISOString(),
@@ -233,7 +278,7 @@ export async function processAnalysisJob(jobId: string): Promise<void> {
         )
         .get(jobRow.document_id) as { max_ver: number };
       const nextManifestVer = prevVerRow.max_ver + 1;
-      const manifestId = `man_${crypto.randomBytes(10).toString("hex")}`;
+      manifestId = `man_${crypto.randomBytes(10).toString("hex")}`;
 
       const highCnt = manifest.fields.filter((f) => f.confidenceTier === "high").length;
       const medCnt = manifest.fields.filter((f) => f.confidenceTier === "medium").length;
@@ -299,43 +344,47 @@ export async function processAnalysisJob(jobId: string): Promise<void> {
       );
 
       db.exec("COMMIT;");
-
-      // Optionally generate initial AcroForm asset right away if requested
-      if (options.autoGenerateAcroForm !== false) {
-        updateJobStage(jobId, "generating_acroform", 88, "running");
-        await generateAcroFormAssetForDocument({
-          tenantId: jobRow.tenant_id,
-          documentId: jobRow.document_id,
-          manifestId,
-          manifest,
-          actorUserId: jobRow.triggered_by,
-        });
-      }
-
-      db.prepare(`
-        UPDATE analysis_jobs
-        SET stage = 'completed', progress_pct = 100, status = 'completed',
-            completed_at = datetime('now'), updated_at = datetime('now')
-        WHERE id = ?
-      `).run(jobId);
-
-      logAuditEvent({
-        tenantId: jobRow.tenant_id,
-        actorUserId: jobRow.triggered_by,
-        action: "document.analyzed",
-        resourceType: "document",
-        resourceId: jobRow.document_id,
-        metadata: {
-          jobId,
-          fieldCount: manifest.fields.length,
-          pageCount: engineOut.inspection.pageCount,
-          isScanned: engineOut.inspection.isScanned,
-        },
-      });
     } catch (innerErr) {
-      db.exec("ROLLBACK;");
+      try {
+        db.exec("ROLLBACK;");
+      } catch {
+        // ignore if already rolled back
+      }
       throw innerErr;
     }
+
+    // Optionally generate initial AcroForm asset right away if requested (outside DB transaction)
+    if (options.autoGenerateAcroForm !== false) {
+      updateJobStage(jobId, "generating_acroform", 88, "running");
+      await generateAcroFormAssetForDocument({
+        tenantId: jobRow.tenant_id,
+        documentId: jobRow.document_id,
+        manifestId,
+        manifest,
+        actorUserId: jobRow.triggered_by,
+      });
+    }
+
+    db.prepare(`
+      UPDATE analysis_jobs
+      SET stage = 'completed', progress_pct = 100, status = 'completed',
+          completed_at = datetime('now'), updated_at = datetime('now')
+      WHERE id = ?
+    `).run(jobId);
+
+    logAuditEvent({
+      tenantId: jobRow.tenant_id,
+      actorUserId: jobRow.triggered_by,
+      action: "document.analyzed",
+      resourceType: "document",
+      resourceId: jobRow.document_id,
+      metadata: {
+        jobId,
+        fieldCount: manifest.fields.length,
+        pageCount: engineOut.inspection.pageCount,
+        isScanned: engineOut.inspection.isScanned,
+      },
+    });
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : "Analysis failed";
     const errCode =
@@ -402,7 +451,7 @@ export async function generateAcroFormAssetForDocument(params: {
   const outKey = `acroforms/${crypto.randomBytes(16).toString("hex")}.pdf`;
   const outAbsPath = resolveSafeStoragePath(outKey);
 
-  const out = await runFormForgePythonEngine<GenerateAcroFormOutput>(
+  const out = await runFormifyPythonEngine<GenerateAcroFormOutput>(
     "generate-acroform",
     {
       pdfPath: sourcePath,

@@ -1,4 +1,4 @@
--- FormForge AI PostgreSQL Production Migration 001
+-- FormifyPDF PostgreSQL Production Migration 001
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 CREATE TABLE IF NOT EXISTS schema_migrations (

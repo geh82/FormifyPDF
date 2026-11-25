@@ -1,4 +1,4 @@
-# FormForge
+# FormifyPDF
 
 PDF form detection, template management, AcroForm generation, and document rendering platform.
 
@@ -7,11 +7,11 @@ PDF form detection, template management, AcroForm generation, and document rende
 - **Frontend**: React 19, TypeScript, Tailwind CSS v4, Vite 8 (`src/App.tsx`, `src/components/studio/`, `src/components/ZipInspectorSection.tsx`).
 - **Backend**: Node.js + Express 4 (`server.ts`, `src/server/routes.ts`, `server/zipRoutes.ts`) serving:
   - `GET /api/health` — readiness and dependency health probe
-  - `POST /api/generate-pdf` — strict Zod validation, sanitization, Python engine invocation, and verified storage
+  - `POST /api/generate-pdf` — strict Zod validation, sanitization, PDF engine invocation, and verified storage
   - `GET /api/download?id=...&type=generated&disposition=attachment|inline` — path-confined attachment download or inline browser viewing/printing
   - `POST /api/upload-signed` — multipart PDF upload with extension, MIME, size, and `%PDF-`/`%%EOF` signature verification
   - `POST/GET/DELETE /api/zip-uploads` — ZIP archive inspection & persistence inside `uploaded-zips/<id>/files/` with PK magic-byte verification, ZIP-slip path confinement, size/entry caps, and `nosniff` + sandbox CSP headers on file reads
-- **PDF Engine**: Python 3.9+ + PyMuPDF (`fitz`) (`python/formforge_engine.py`) for PDF inspection, field detection, and rendering, alongside coordinate map generation in `scripts/build_field_map.py`.
+- **PDF Engine**: Python 3.9+ + PyMuPDF (`fitz`) (`python/formifypdf_engine.py`) with Node fallback (`src/server/formifypdf-node-engine.ts`) for PDF inspection, field detection, AcroForm generation, and rendering, alongside coordinate map generation in `scripts/build_field_map.py`.
 - **Storage**: Pluggable abstraction (`src/lib/storage/`):
   - `LocalStorageProvider` (`STORAGE_PROVIDER=local`) stores generated PDFs in `public/generated/` and signed uploads separately in `public/signed/`.
   - `ObjectStorageProvider` (`STORAGE_PROVIDER=s3`) uses `@aws-sdk/client-s3` for S3-compatible object storage (`generated/` and `signed/` prefixes) in production.
@@ -97,24 +97,24 @@ See `.env.example`:
 
 ---
 
-# FormForge AI — Universal PDF-to-AcroForm Conversion & Document Automation
+# FormifyPDF — Universal PDF-to-AcroForm Conversion & Document Automation
 
-**FormForge Studio** (accessible via the top navigation bar or `FormForge AI Studio` tab), implementing two strictly separated processing engines:
+**FormifyPDF Studio** (accessible via the top navigation bar or `Conversion Studio` tab), implementing two strictly separated processing engines:
 
-1. **Engine A — Conversion Studio (`/api/v1/documents/*`, `/api/v1/templates/*`, `python/formforge_engine.py`)**:
+1. **Engine A — Conversion Studio (`/api/v1/documents/*`, `/api/v1/templates/*`, `python/formifypdf_engine.py`, `src/server/formifypdf-node-engine.ts`)**:
    - Ingests native digital PDFs, scanned image-only PDFs, and mixed documents across A4, A3, A5, Letter, Legal, and custom page sizes.
    - Sanitizes active PDF scripts/triggers (`/JS`, `/JavaScript`, `/OpenAction`, `/AA`) upon conversion.
-   - Runs **PyMuPDF + pdfplumber + OpenCV morphological preprocessing + Tesseract OCR** (`eng`) to detect 16 field types (including grouped `char_cells` boxes) with evidence-based confidence scoring (`high`, `medium`, `low`).
-   - Provides a real **PDF.js Visual Field Editor** (`src/components/studio/PdfFieldEditor.tsx`) with reversible coordinate transforms (`src/lib/formforge/coordinate.ts`), drag/resize/draw tools, undo/redo, and property inspector.
-   - Generates real AcroForm PDFs with `/AP` appearance streams, executes `pypdf` + PyMuPDF structural validation, tracks version diffs, and enforces dual-check (`structuralVerified` + `visualVerified`) template approval before locking.
+   - Runs **PyMuPDF + pdfplumber + OpenCV morphological preprocessing + Tesseract OCR** (`eng`) with pure-Node fallback (`pdfjs-dist` + `pdf-lib` + `tesseract.js` + raster CV) to detect 16 field types (including grouped `char_cells` boxes) with evidence-based confidence scoring (`high`, `medium`, `low`).
+   - Provides a real **PDF.js Visual Field Editor** (`src/components/studio/PdfFieldEditor.tsx`) with reversible coordinate transforms (`src/lib/formifypdf/coordinate.ts`), drag/resize/draw tools, undo/redo, and property inspector.
+   - Generates real AcroForm PDFs with `/AP` appearance streams, executes structural + visual validation, tracks version diffs, and enforces dual-check (`structuralVerified` + `visualVerified`) template approval before locking.
 2. **Engine B — Independent Customer Rendering & Submission (`/api/v1/render/:templateId`)**:
    - Consumes only **approved** templates (consumes approved templates from the template store).
    - Dynamically generates multi-type forms from `FieldManifest`, populates AcroForm widgets and character-cell arrays, regenerates appearance streams, **flattens PDFs by default** so private fillable masters stay protected, and accepts physically signed PDF uploads.
 
-## Additional Prerequisites for FormForge AI Studio
+## Additional Prerequisites for FormifyPDF Studio
 
 ```bash
-sudo apt-get update && sudo apt-get install -y \
+sudo apt-get update && sudo-get install -y \
   python3 python3-fitz python3-opencv python3-pil python3-pypdf \
   tesseract-ocr tesseract-ocr-eng
 python3 -m pip install pdfplumber pytesseract
@@ -122,9 +122,9 @@ python3 -m pip install pdfplumber pytesseract
 
 ## Authentication, RBAC & First-Run Admin Claim
 
-- If `FORMFORGE_ADMIN_PASSWORD` is unset, open **FormForge AI Studio** and use the one-time **Claim FormForge AI Administrator** screen (`POST /api/v1/auth/bootstrap`). Once claimed, public registration locks automatically.
+- If `FORMIFYPDF_ADMIN_PASSWORD` is unset, open **FormifyPDF Studio** and use the one-time **Claim FormifyPDF Administrator** screen (`POST /api/v1/auth/bootstrap`). Once claimed, public registration locks automatically.
 - Six enforced RBAC profiles: `administrator`, `template_manager`, `editor`, `reviewer`, `api_integration_user`, `read_only_user`.
-- Programmatic integrations authenticate with scoped keys (`X-API-Key: ffk_...`) created in **API & Integrations**.
+- Programmatic integrations authenticate with scoped keys (`X-API-Key: fpk_...`) created in **API & Integrations**.
 - Interactive OpenAPI 3.1 schema: `GET /api/v1/openapi.json`.
 
 ## Docker & PostgreSQL Production Deployment
@@ -139,7 +139,7 @@ docker compose up --build -d
 
 ## Backup, Recovery & Troubleshooting
 
-- **Backups**: Snapshot `storage/formforge/` (database `formforge.db` + `originals/`, `acroforms/`, `renders/`, `signed/`) or run `pg_dump` against `DATABASE_URL`.
+- **Backups**: Snapshot `storage/formifypdf/` (database `formifypdf.sqlite` + `originals/`, `acroforms/`, `renders/`, `signed/`) or run `pg_dump` against `DATABASE_URL`.
 - **OCR slow or missing**: Verify `tesseract --version` and ensure `PYTHON_TIMEOUT_MS` is set to at least `60000` for multi-page scanned documents.
 - **Coordinate drift checks**: Every manifest field stores `top_left_pdf_pt` coordinates relative to the effective CropBox; run `npm test` to verify coordinate round-trips and real PDF AcroForm widget generation.
 

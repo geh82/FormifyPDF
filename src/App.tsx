@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ZipInspectorSection } from "./components/ZipInspectorSection.tsx";
-import { FormForgeStudio } from "./components/studio/FormForgeStudio.tsx";
+import { FormifyPdfStudio } from "./components/studio/FormifyPdfStudio.tsx";
 
 type WorkspaceMode = "studio" | "zip";
 
@@ -99,7 +99,7 @@ export default function App() {
         </section>
 
         <section id="wizard-workspace">
-          {workspaceMode === "studio" ? <FormForgeStudio /> : <ZipInspectorSection />}
+          {workspaceMode === "studio" ? <FormifyPdfStudio /> : <ZipInspectorSection />}
         </section>
       </main>
     </div>

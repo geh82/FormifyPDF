@@ -7,6 +7,7 @@ import { createZipUploadRouter } from "./server/zipRoutes.ts";
 import type { ZipRouterConfig } from "./server/zipRoutes.ts";
 import { getStorageProvider } from "./src/lib/storage/storage.ts";
 import { getDatabase, resetDatabaseCache } from "./src/server/db/database.ts";
+import { recoverStaleJobs } from "./src/server/job-queue.ts";
 import { createApiRouter } from "./src/server/routes.ts";
 import type { ApiRouterConfig } from "./src/server/routes.ts";
 import {
@@ -21,8 +22,9 @@ export interface AppConfig extends ApiRouterConfig {
 }
 
 export async function createApp(apiConfig: AppConfig = {}) {
-  // Initialize SQLite relational schema & baseline RBAC
+  // Initialize SQLite relational schema, baseline RBAC, and recover interrupted jobs
   getDatabase();
+  recoverStaleJobs();
 
   const app = express();
   app.disable("x-powered-by");
@@ -40,7 +42,7 @@ export async function createApp(apiConfig: AppConfig = {}) {
 
   app.use(express.json({ limit: "4mb" }));
 
-  // Mount FormForge AI v1 REST API
+  // Mount FormifyPDF v1 REST API
   app.use(
     "/api/v1",
     createV1ApiRouter({
@@ -106,7 +108,7 @@ if (isEntryPoint) {
 
   const app = await createApp();
 
-  // Periodic POPIA & FormForge retention cleanup
+  // Periodic POPIA & FormifyPDF retention cleanup
   const storage = getStorageProvider();
   const retentionTimer = setInterval(() => {
     storage.deleteExpired(retentionHours).catch((err: unknown) => {
@@ -115,13 +117,13 @@ if (isEntryPoint) {
     try {
       purgeAllTenantsExpiredDocuments();
     } catch (err) {
-      console.error("[FormForge Retention Error]", err);
+      console.error("[FormifyPDF Retention Error]", err);
     }
   }, 60 * 60 * 1000);
   retentionTimer.unref();
 
   const httpServer = app.listen(port, "0.0.0.0", () => {
-    console.log(`FormForge listening on http://0.0.0.0:${port}`);
+    console.log(`FormifyPDF listening on http://0.0.0.0:${port}`);
   });
 
   const shutdown = (signal: string) => {

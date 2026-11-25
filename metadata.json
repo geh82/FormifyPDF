@@ -1,6 +1,6 @@
 {
-  "name": "FormForge",
-  "description": "Standalone PDF form detection, template management, and document rendering platform."
+  "name": "FormifyPDF",
+  "description": "Standalone PDF form detection, AcroForm generation, template management, and document rendering platform.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

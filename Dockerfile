@@ -22,7 +22,7 @@ RUN npm ci --omit=dev=false
 COPY . .
 RUN npm run build
 
-RUN mkdir -p storage/formforge public/generated public/signed uploaded-zips
+RUN mkdir -p storage/formifypdf public/generated public/signed uploaded-zips
 
 EXPOSE 3000
 

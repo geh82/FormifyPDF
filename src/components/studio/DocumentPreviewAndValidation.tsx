@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Download,
   Eye,
   FileCheck2,
   Play,
@@ -15,7 +16,7 @@ import type {
   AcroFormValidationReport,
   DetectedFormField,
   FieldManifest,
-} from "../../lib/formforge/types.ts";
+} from "../../lib/formifypdf/types.ts";
 import type { StudioApiClient } from "./studio-api.ts";
 
 if (typeof window !== "undefined" && pdfjsLib.GlobalWorkerOptions) {
@@ -48,13 +49,15 @@ function PdfCanvasPane({
 
   useEffect(() => {
     let cancelled = false;
+    let loadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null;
     let doc: pdfjsLib.PDFDocumentProxy | null = null;
     if (!pdfBytes) return;
 
     (async () => {
       try {
         setRenderError(null);
-        doc = await pdfjsLib.getDocument({ data: pdfBytes.slice() }).promise;
+        loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice() });
+        doc = await loadingTask.promise;
         if (cancelled) return;
         const page = await doc.getPage(Math.min(pageIndex + 1, doc.numPages));
         if (cancelled) return;
@@ -80,8 +83,10 @@ function PdfCanvasPane({
     return () => {
       cancelled = true;
       if (doc) {
-        const closable = doc as unknown as { destroy?: () => Promise<void> };
-        void closable.destroy?.();
+        void Promise.resolve(doc.cleanup?.()).catch(() => {});
+      }
+      if (loadingTask) {
+        void Promise.resolve(loadingTask.destroy?.()).catch(() => {});
       }
     };
   }, [pdfBytes, pageIndex, scale]);
@@ -234,6 +239,36 @@ export function DocumentPreviewAndValidation({
     }
   };
 
+  const handleDownloadAcroForm = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const slug =
+        documentTitle
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "") || "document";
+      const file = await api.fetchFileWithFilename(
+        `/api/v1/documents/${documentId}/acroform-pdf?disposition=attachment`,
+        `${slug}-fillable-acroform.pdf`
+      );
+      const blobUrl = URL.createObjectURL(
+        new Blob([file.bytes.slice()], { type: file.contentType })
+      );
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = file.filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 2500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to download AcroForm PDF");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleApproveTemplate = async () => {
     if (!templateId) return;
     setBusy(true);
@@ -335,6 +370,15 @@ export function DocumentPreviewAndValidation({
             }`}
           >
             Sample Fill Result
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void handleDownloadAcroForm()}
+            className="inline-flex items-center gap-1.5 rounded bg-emerald-900 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-800 disabled:opacity-50 whitespace-nowrap shrink-0"
+          >
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+            Download AcroForm
           </button>
         </div>
       </div>

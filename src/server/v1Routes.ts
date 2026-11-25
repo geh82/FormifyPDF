@@ -4,14 +4,14 @@ import express from "express";
 import type { NextFunction, Response } from "express";
 import multer from "multer";
 import { z } from "zod";
-import { FieldManifestUpdateSchema } from "../lib/formforge/manifest-schema.ts";
+import { FieldManifestUpdateSchema } from "../lib/formifypdf/manifest-schema.ts";
 import type {
   AcroFormValidationReport,
   FieldManifest,
   OutputPolicy,
   RoleName,
   TemplateStatus,
-} from "../lib/formforge/types.ts";
+} from "../lib/formifypdf/types.ts";
 import {
   createSessionForUser,
   hasAnyAdminUserInDb,
@@ -26,7 +26,7 @@ import {
   type AuthedRequest,
 } from "./auth.ts";
 import { ROLE_DEFINITIONS, getDatabase, getRolePermissions } from "./db/database.ts";
-import { runFormForgePythonEngine } from "./formforge-runner.ts";
+import { runFormifyPythonEngine } from "./formifypdf-runner.ts";
 import {
   computeDirectoryBytes,
   deleteStorageObject,
@@ -35,7 +35,7 @@ import {
   saveStorageBuffer,
   validatePdfBufferSignature,
   validateSupportingFileSignature,
-} from "./formforge-storage.ts";
+} from "./formifypdf-storage.ts";
 import {
   enqueueAnalysisJob,
   generateAcroFormAssetForDocument,
@@ -293,7 +293,8 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     res.on("finish", () => {
       try {
         const db = getDatabase();
-        const principal = req.principal || resolvePrincipalFromRequest(req);
+        const principal =
+          req.principal || resolvePrincipalFromRequest(req, { skipTouchApiKey: true });
         db.prepare(`
           INSERT INTO api_requests (id, tenant_id, api_key_id, user_id, method, path, status_code, duration_ms)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -321,7 +322,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     res.json({
       openapi: "3.1.0",
       info: {
-        title: "FormForge AI REST API",
+        title: "FormifyPDF REST API",
         version: "1.0.0",
         description:
           "Universal PDF Intelligence, Hybrid OCR/CV Field Detection, AcroForm Generation, Template Versioning & Document Rendering API.",
@@ -391,7 +392,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
   // -------------------------------------------------------------------------
   router.get("/auth/status", (req: AuthedRequest, res) => {
     const principal = resolvePrincipalFromRequest(req);
-    const hasEnvAdmin = Boolean((process.env.FORMFORGE_ADMIN_PASSWORD || "").trim());
+    const hasEnvAdmin = Boolean((process.env.FORMIFYPDF_ADMIN_PASSWORD || "").trim());
     const dbHasAdmin = hasAnyAdminUserInDb();
     res.json({
       ok: true,
@@ -411,9 +412,9 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     });
   });
 
-  // One-time atomic bootstrap of the first administrator account when FORMFORGE_ADMIN_PASSWORD is unset
+  // One-time atomic bootstrap of the first administrator account when FORMIFYPDF_ADMIN_PASSWORD is unset
   router.post("/auth/bootstrap", limiter, (req, res) => {
-    if ((process.env.FORMFORGE_ADMIN_PASSWORD || "").trim()) {
+    if ((process.env.FORMIFYPDF_ADMIN_PASSWORD || "").trim()) {
       res.status(403).json({
         ok: false,
         code: "BOOTSTRAP_LOCKED",
@@ -510,7 +511,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
 
     const db = getDatabase();
     const email = parsed.data.email.toLowerCase();
-    const envPass = (process.env.FORMFORGE_ADMIN_PASSWORD || "").trim();
+    const envPass = (process.env.FORMIFYPDF_ADMIN_PASSWORD || "").trim();
 
     let userRow = db
       .prepare(
@@ -545,6 +546,15 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       } else if (userRow && userRow.role_name === "administrator") {
         // Env admin password explicitly overrides claimed fallback hash
         const session = createSessionForUser(userRow.id, userRow.tenant_id, req);
+        logAuditEvent({
+          tenantId: userRow.tenant_id,
+          actorUserId: userRow.id,
+          actorEmail: userRow.email,
+          action: "auth.login",
+          resourceType: "session",
+          resourceId: session.sessionId,
+          ipAddress: req.ip,
+        });
         res.json({
           ok: true,
           token: session.token,
@@ -1039,7 +1049,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         // Preliminary fast structural inspection to validate encryption/corruption immediately
         try {
           const abs = resolveSafeStoragePath(stored.storageKey);
-          const inspect = await runFormForgePythonEngine<{
+          const inspect = await runFormifyPythonEngine<{
             pageCount: number;
             isScanned: boolean;
             hasExistingAcroForm: boolean;
@@ -1207,18 +1217,57 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     "/documents/:id/acroform-pdf",
     requireAuth,
     requirePermission("documents:read"),
-    (req: AuthedRequest, res) => {
+    async (req: AuthedRequest, res) => {
       const db = getDatabase();
-      const asset = db
+      const tid = req.principal!.tenantId;
+      const doc = db
         .prepare(
-          `SELECT a.* FROM acroform_assets a
-           JOIN documents d ON d.id = a.document_id
-           WHERE d.id = ? AND d.tenant_id = ?
+          "SELECT id, title, original_filename FROM documents WHERE id = ? AND tenant_id = ?"
+        )
+        .get(req.params.id, tid) as
+        | { id: string; title: string; original_filename: string }
+        | undefined;
+      if (!doc) {
+        res.status(404).json({ ok: false, error: "Document not found" });
+        return;
+      }
+
+      let asset = db
+        .prepare(
+          `SELECT a.storage_key FROM acroform_assets a
+           WHERE a.document_id = ? AND a.tenant_id = ?
            ORDER BY a.created_at DESC LIMIT 1`
         )
-        .get(req.params.id, req.principal!.tenantId) as
-        | { storage_key: string }
-        | undefined;
+        .get(doc.id, tid) as { storage_key: string } | undefined;
+
+      if (!asset) {
+        const latestMan = db
+          .prepare(
+            `SELECT id, manifest_json FROM field_manifests
+             WHERE document_id = ? AND tenant_id = ?
+             ORDER BY version_number DESC LIMIT 1`
+          )
+          .get(doc.id, tid) as { id: string; manifest_json: string } | undefined;
+        if (latestMan) {
+          try {
+            const generated = await generateAcroFormAssetForDocument({
+              tenantId: tid,
+              documentId: doc.id,
+              manifestId: latestMan.id,
+              manifest: JSON.parse(latestMan.manifest_json) as FieldManifest,
+              actorUserId: req.principal!.userId,
+            });
+            asset = { storage_key: generated.storageKey };
+          } catch (err) {
+            res.status(422).json({
+              ok: false,
+              error: err instanceof Error ? err.message : "Failed to generate AcroForm PDF",
+            });
+            return;
+          }
+        }
+      }
+
       if (!asset) {
         res.status(404).json({ ok: false, error: "No generated AcroForm asset found yet" });
         return;
@@ -1229,8 +1278,19 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         res.status(404).json({ ok: false, error: "AcroForm file missing on storage" });
         return;
       }
+
+      const rawBase = (doc.title || doc.original_filename || "document").replace(/\.pdf$/i, "");
+      const cleanSlug =
+        rawBase
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 64) || "document";
+      const downloadName = sanitizeHeaderFilename(`${cleanSlug}-fillable-acroform.pdf`);
+      const disposition = req.query.disposition === "attachment" ? "attachment" : "inline";
+
       res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", 'inline; filename="acroform_master.pdf"');
+      res.setHeader("Content-Disposition", `${disposition}; filename="${downloadName}"`);
       res.send(buf);
     }
   );
@@ -1473,7 +1533,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       const medCnt = nextManifest.fields.filter((f) => f.confidenceTier === "medium").length;
       const lowCnt = nextManifest.fields.filter((f) => f.confidenceTier === "low").length;
 
-      db.exec("BEGIN;");
+      db.exec("BEGIN IMMEDIATE;");
       try {
         db.prepare(`
           INSERT INTO field_manifests (
@@ -1631,7 +1691,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       const outAbs = resolveSafeStoragePath(outKey);
 
       try {
-        const result = await runFormForgePythonEngine<{
+        const result = await runFormifyPythonEngine<{
           populatedWidgets: number;
           flattened: boolean;
         }>("render-pdf", {
@@ -1656,6 +1716,8 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
           ok: false,
           error: err instanceof Error ? err.message : "Failed to render sample test PDF",
         });
+      } finally {
+        deleteStorageObject(outKey);
       }
     }
   );
@@ -1752,7 +1814,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         .slice(0, 60);
       const slug = `${slugBase || "template"}-${crypto.randomBytes(3).toString("hex")}`;
 
-      db.exec("BEGIN;");
+      db.exec("BEGIN IMMEDIATE;");
       try {
         db.prepare(`
           INSERT INTO templates (
@@ -1888,7 +1950,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
           ? req.body.changelog.trim().slice(0, 300)
           : `Version ${nextVer}`;
 
-      db.exec("BEGIN;");
+      db.exec("BEGIN IMMEDIATE;");
       try {
         db.prepare(`
           INSERT INTO template_versions (
@@ -1977,7 +2039,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       }
 
       const apprId = `appr_${crypto.randomBytes(10).toString("hex")}`;
-      db.exec("BEGIN;");
+      db.exec("BEGIN IMMEDIATE;");
       try {
         db.prepare(
           "UPDATE template_versions SET is_approved = 1, is_locked = 1 WHERE id = ?"
@@ -2050,7 +2112,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       const newName = `${String(tpl.name)} (Copy)`;
       const newSlug = `${String(tpl.slug)}-copy-${crypto.randomBytes(3).toString("hex")}`;
 
-      db.exec("BEGIN;");
+      db.exec("BEGIN IMMEDIATE;");
       try {
         db.prepare(`
           INSERT INTO templates (
@@ -2346,7 +2408,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       const outAbs = resolveSafeStoragePath(outKey);
 
       try {
-        const out = await runFormForgePythonEngine<{
+        const out = await runFormifyPythonEngine<{
           populatedWidgets: number;
           flattened: boolean;
         }>("render-pdf", {
@@ -2365,7 +2427,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
 
         const sha256 = crypto.createHash("sha256").update(renderedBuf).digest("hex");
         const genId = `gen_${crypto.randomBytes(10).toString("hex")}`;
-        const reference = `FF-${genId.slice(4, 12).toUpperCase()}`;
+        const reference = `FP-${genId.slice(4, 12).toUpperCase()}`;
         const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
         db.prepare(`
@@ -2728,7 +2790,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
           downloadUrl: string;
         }> = [];
 
-        db.exec("BEGIN;");
+        db.exec("BEGIN IMMEDIATE;");
         try {
           const insSup = db.prepare(`
             INSERT INTO supporting_documents (
@@ -3098,7 +3160,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         return;
       }
 
-      const rawKey = `ffk_${crypto.randomBytes(24).toString("hex")}`;
+      const rawKey = `fpk_${crypto.randomBytes(24).toString("hex")}`;
       const id = `key_${crypto.randomBytes(10).toString("hex")}`;
       const db = getDatabase();
       db.prepare(`

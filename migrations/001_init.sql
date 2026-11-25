@@ -1,4 +1,4 @@
--- FormForge AI Relational Schema (SQLite Runtime Migration 001)
+-- FormifyPDF Relational Schema (SQLite Runtime Migration 001)
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_migrations (

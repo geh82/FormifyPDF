@@ -1,7 +1,7 @@
 import type { DocumentPageInfo, PdfPageBox, PdfRect } from "./types.ts";
 
 /**
- * Canonical FormForge Coordinate Transformation Module
+ * Canonical FormifyPDF Coordinate Transformation Module
  *
  * Canonical storage space ("top_left_pdf_pt"):
  *   - Origin (0, 0) is top-left of the visible CropBox AFTER PDF /Rotate.

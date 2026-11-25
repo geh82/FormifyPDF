@@ -8,9 +8,9 @@ import {
   pdfRectToViewportPx,
   topLeftPdfToBottomLeftPdf,
   viewportPxToPdfRect,
-} from "../../src/lib/formforge/coordinate.ts";
+} from "../../src/lib/formifypdf/coordinate.ts";
 
-describe("FormForge AI Coordinate Calibration & Studio Frontend", () => {
+describe("FormifyPDF Coordinate Calibration & Studio Frontend", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -53,7 +53,7 @@ describe("FormForge AI Coordinate Calibration & Studio Frontend", () => {
     expect(backTopLeft.height).toBeCloseTo(orig.height, 1);
   });
 
-  it("opens FormForge AI Studio tab, shows First-Run Admin Claim, and renders Dashboard & Approved Template", async () => {
+  it("opens FormifyPDF Studio tab, shows First-Run Admin Claim, and renders Dashboard & Approved Template", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url === "/api/v1/auth/status") {
@@ -73,10 +73,10 @@ describe("FormForge AI Coordinate Calibration & Studio Frontend", () => {
           ok: true,
           json: async () => ({
             ok: true,
-            token: "ffs_testtoken",
+            token: "fps_testtoken",
             user: {
               id: "usr_admin",
-              email: "admin@formforge.local",
+              email: "admin@formifypdf.local",
               fullName: "Workspace Administrator",
               role: "administrator",
               tenantId: "tenant_default",
@@ -179,7 +179,7 @@ describe("FormForge AI Coordinate Calibration & Studio Frontend", () => {
       root.render(<App />);
     });
 
-    // Switch to FormForge AI Studio tab
+    // Verify Conversion Studio tab
     const studioTab = Array.from(container.querySelectorAll('button[role="tab"]')).find((b) =>
       b.textContent?.includes("Conversion Studio")
     ) as HTMLButtonElement;
@@ -189,7 +189,7 @@ describe("FormForge AI Coordinate Calibration & Studio Frontend", () => {
       studioTab.click();
     });
 
-    expect(container.textContent).toContain("Claim FormForge AI Administrator");
+    expect(container.textContent).toContain("Claim FormifyPDF Administrator");
 
     // Fill passwords & claim admin
     const pwInputs = Array.from(
@@ -228,5 +228,203 @@ describe("FormForge AI Coordinate Calibration & Studio Frontend", () => {
     });
 
     expect(container.textContent).toContain("Sample Approved Form Template");
+  });
+
+  it("runs the 3-step Upload PDF -> Convert to Fillable PDF -> Download AcroForm workflow cleanly", async () => {
+    let jobPollCount = 0;
+    const downloadCalls: string[] = [];
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/v1/auth/status") {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            bootstrapped: true,
+            requiresFirstRunSetup: false,
+            authenticated: true,
+            user: {
+              id: "usr_admin",
+              email: "admin@formifypdf.local",
+              fullName: "Workspace Administrator",
+              role: "administrator",
+              tenantId: "tenant_default",
+              permissions: [
+                "documents:read",
+                "documents:write",
+                "fields:edit",
+                "templates:read",
+                "templates:write",
+                "templates:approve",
+                "render:write",
+              ],
+            },
+          }),
+        };
+      }
+      if (url === "/api/v1/dashboard") {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            metrics: { totalDocumentsProcessed: 0 },
+            recentActivity: [],
+            recentJobs: [],
+          }),
+        };
+      }
+      if (url === "/api/v1/documents") {
+        return { ok: true, json: async () => ({ ok: true, documents: [] }) };
+      }
+      if (url === "/api/v1/templates") {
+        return { ok: true, json: async () => ({ ok: true, templates: [] }) };
+      }
+      if (url === "/api/v1/jobs") {
+        return { ok: true, json: async () => ({ ok: true, jobs: [] }) };
+      }
+      if (url === "/api/v1/jobs/job_conv_1") {
+        jobPollCount += 1;
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            job: {
+              id: "job_conv_1",
+              document_id: "doc_conv_1",
+              job_type: "full_analysis",
+              stage: "completed",
+              progress_pct: 100,
+              status: "completed",
+              attempts: 1,
+              created_at: "2026-11-24T00:00:00Z",
+              completed_at: "2026-11-24T00:00:02Z",
+            },
+          }),
+        };
+      }
+      if (url === "/api/v1/documents/doc_conv_1") {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            document: {
+              id: "doc_conv_1",
+              title: "Client Application",
+              original_filename: "client-application.pdf",
+              page_count: 2,
+              latest_field_count: 6,
+            },
+            latestAsset: { widget_count: 6 },
+          }),
+        };
+      }
+      if (url === "/api/v1/documents/doc_conv_1/acroform-pdf?disposition=attachment") {
+        downloadCalls.push(url);
+        const bytes = new TextEncoder().encode("%PDF-1.7\n%%EOF");
+        return {
+          ok: true,
+          headers: new Headers({
+            "content-type": "application/pdf",
+            "content-disposition": 'attachment; filename="client-application-fillable-acroform.pdf"',
+          }),
+          arrayBuffer: async () => bytes.buffer,
+        };
+      }
+      return { ok: true, json: async () => ({ ok: true }) };
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const origXhr = globalThis.XMLHttpRequest;
+    class MockXMLHttpRequest {
+      upload: { onprogress: ((evt: ProgressEvent) => void) | null } = { onprogress: null };
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      status = 201;
+      responseText = "";
+      open() {}
+      setRequestHeader() {}
+      send() {
+        this.upload.onprogress?.({ lengthComputable: true, loaded: 100, total: 100 } as ProgressEvent);
+        this.responseText = JSON.stringify({
+          ok: true,
+          document: { id: "doc_conv_1", title: "Client Application", pageCount: 2 },
+          jobId: "job_conv_1",
+        });
+        this.onload?.();
+      }
+    }
+    globalThis.XMLHttpRequest = MockXMLHttpRequest as unknown as typeof XMLHttpRequest;
+
+    const origCreateObjectUrl = URL.createObjectURL;
+    const origRevokeObjectUrl = URL.revokeObjectURL;
+    URL.createObjectURL = vi.fn(() => "blob:mock-acroform-url");
+    URL.revokeObjectURL = vi.fn();
+
+    try {
+      await act(async () => {
+        root.render(<App />);
+      });
+
+      const convertNav = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.trim() === "Convert PDF"
+      ) as HTMLButtonElement;
+      expect(convertNav).toBeTruthy();
+
+      await act(async () => {
+        convertNav.click();
+      });
+
+      const fileInput = container.querySelector("#formifypdf-pdf-upload") as HTMLInputElement;
+      expect(fileInput).toBeTruthy();
+
+      const convertBtnBefore = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("Convert to Fillable PDF")
+      ) as HTMLButtonElement;
+      expect(convertBtnBefore.disabled).toBe(true);
+
+      const mockPdf = new File(["%PDF-1.7\n%%EOF"], "client-application.pdf", {
+        type: "application/pdf",
+      });
+      await act(async () => {
+        Object.defineProperty(fileInput, "files", { value: [mockPdf], configurable: true });
+        fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+
+      const convertBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("Convert to Fillable PDF")
+      ) as HTMLButtonElement;
+      expect(convertBtn.disabled).toBe(false);
+
+      await act(async () => {
+        convertBtn.click();
+      });
+
+      // Allow job poll timer (600ms) + async state updates to complete
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 750));
+      });
+
+      expect(jobPollCount).toBeGreaterThanOrEqual(1);
+      expect(container.textContent).toContain("Conversion Complete");
+
+      const dlBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("Download AcroForm")
+      ) as HTMLButtonElement;
+      expect(dlBtn).toBeTruthy();
+
+      await act(async () => {
+        dlBtn.click();
+      });
+
+      expect(downloadCalls).toEqual([
+        "/api/v1/documents/doc_conv_1/acroform-pdf?disposition=attachment",
+      ]);
+    } finally {
+      globalThis.XMLHttpRequest = origXhr;
+      URL.createObjectURL = origCreateObjectUrl;
+      URL.revokeObjectURL = origRevokeObjectUrl;
+    }
   });
 });

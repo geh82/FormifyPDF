@@ -3,17 +3,17 @@ import {
   computeRectIoU,
   roundPt,
   topLeftPdfToBottomLeftPdf,
-} from "../lib/formforge/coordinate.ts";
+} from "../lib/formifypdf/coordinate.ts";
 import type {
   CharGridMetadata,
   ConfidenceTier,
   DetectedFormField,
   DetectionSource,
   DetectionSummary,
-  FormForgeFieldType,
+  FormifyFieldType,
   PdfPageBox,
   PdfRect,
-} from "../lib/formforge/types.ts";
+} from "../lib/formifypdf/types.ts";
 import type {
   ExtractedLineSegment,
   ExtractedRectPrimitive,
@@ -725,7 +725,7 @@ export function inferSemanticType(
   geomKind: string,
   cellCount = 0
 ): {
-  type: FormForgeFieldType;
+  type: FormifyFieldType;
   required: boolean;
   multiline: boolean;
   options: string[];
@@ -1165,7 +1165,7 @@ export function fuseAndClassifyPageGeometry(params: {
   rotation: 0 | 90 | 180 | 270;
   existingWidgets: Array<{
     name: string;
-    type: FormForgeFieldType;
+    type: FormifyFieldType;
     rect: PdfRect;
     defaultValue?: string;
     maxLength?: number;
@@ -1340,7 +1340,7 @@ function fuseAndClassifyPageGeometryCore(params: {
   rotation: 0 | 90 | 180 | 270;
   existingWidgets: Array<{
     name: string;
-    type: FormForgeFieldType;
+    type: FormifyFieldType;
     rect: PdfRect;
     defaultValue?: string;
     maxLength?: number;

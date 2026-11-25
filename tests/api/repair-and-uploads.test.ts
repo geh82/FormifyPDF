@@ -11,7 +11,7 @@ import {
   resetStorageProviderCache,
 } from "../../src/lib/storage/storage.ts";
 import { getDatabase, resetDatabaseCache } from "../../src/server/db/database.ts";
-import { runFormForgeNodeEngine } from "../../src/server/formforge-node-engine.ts";
+import { runFormifyNodeEngine } from "../../src/server/formifypdf-node-engine.ts";
 
 // Minimal valid magic-byte fixtures for PNG, JPEG, and WebP
 const VALID_PNG = Buffer.from([
@@ -38,7 +38,7 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
   let tmpRoot: string;
   let generatedDir: string;
   let signedDir: string;
-  let formforgeStorageDir: string;
+  let formifyStorageDir: string;
   let dbPath: string;
   let server: http.Server;
   let baseUrl: string;
@@ -49,19 +49,19 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
   let samplePdf: Buffer;
 
   beforeAll(async () => {
-    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "formforge-repair-test-"));
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "formifypdf-repair-test-"));
     generatedDir = path.join(tmpRoot, "generated");
     signedDir = path.join(tmpRoot, "signed");
-    formforgeStorageDir = path.join(tmpRoot, "ff-storage");
-    dbPath = path.join(tmpRoot, "formforge.sqlite");
+    formifyStorageDir = path.join(tmpRoot, "fp-storage");
+    dbPath = path.join(tmpRoot, "formifypdf.sqlite");
 
     process.env.STORAGE_PROVIDER = "local";
     process.env.GENERATED_PDF_DIR = generatedDir;
     process.env.SIGNED_PDF_DIR = signedDir;
-    process.env.FORMFORGE_STORAGE_DIR = formforgeStorageDir;
-    process.env.FORMFORGE_DB_PATH = dbPath;
+    process.env.FORMIFYPDF_STORAGE_DIR = formifyStorageDir;
+    process.env.FORMIFYPDF_DB_PATH = dbPath;
     process.env.MAX_UPLOAD_BYTES = String(256 * 1024); // 256 KB cap for size-limit test
-    delete process.env.FORMFORGE_ADMIN_PASSWORD;
+    delete process.env.FORMIFYPDF_ADMIN_PASSWORD;
 
     resetStorageProviderCache();
     resetDatabaseCache();
@@ -84,8 +84,8 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     fs.rmSync(tmpRoot, { recursive: true, force: true });
     delete process.env.GENERATED_PDF_DIR;
     delete process.env.SIGNED_PDF_DIR;
-    delete process.env.FORMFORGE_STORAGE_DIR;
-    delete process.env.FORMFORGE_DB_PATH;
+    delete process.env.FORMIFYPDF_STORAGE_DIR;
+    delete process.env.FORMIFYPDF_DB_PATH;
     delete process.env.MAX_UPLOAD_BYTES;
   });
 
@@ -187,7 +187,7 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     resetStorageProviderCache();
     expect(() => getStorageProvider()).toThrow(/S3_BUCKET/);
 
-    process.env.S3_BUCKET = "formforge-test-bucket";
+    process.env.S3_BUCKET = "formifypdf-test-bucket";
     process.env.S3_REGION = "eu-west-1";
     process.env.S3_ENDPOINT = "http://127.0.0.1:1";
     process.env.S3_FORCE_PATH_STYLE = "true";
@@ -392,22 +392,22 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     expect(dlAfter.status).toBe(404);
   });
 
-  it("handles special Unicode characters cleanly in FormForge Node PDF engine and redacts PII in overflow errors", async () => {
-    // FormForge Node engine with accented/Unicode characters
-    // FormForge Node engine full round-trip: analyze -> generate-acroform -> render flattened + fillable
-    const pdfPath = path.join(tmpRoot, "ff_node_test.pdf");
-    const acroPath = path.join(tmpRoot, "ff_node_acro.pdf");
-    const flatPath = path.join(tmpRoot, "ff_node_flat.pdf");
+  it("handles special Unicode characters cleanly in FormifyPDF Node PDF engine and redacts PII in overflow errors", async () => {
+    // FormifyPDF Node engine with accented/Unicode characters
+    // FormifyPDF Node engine full round-trip: analyze -> generate-acroform -> render flattened + fillable
+    const pdfPath = path.join(tmpRoot, "fp_node_test.pdf");
+    const acroPath = path.join(tmpRoot, "fp_node_acro.pdf");
+    const flatPath = path.join(tmpRoot, "fp_node_flat.pdf");
     fs.writeFileSync(pdfPath, samplePdf);
 
-    const analysis = await runFormForgeNodeEngine<{
+    const analysis = await runFormifyNodeEngine<{
       manifest: Record<string, unknown>;
     }>("analyze", {
       pdfPath,
       options: { documentId: "doc_node_check" },
     });
 
-    const acroRes = await runFormForgeNodeEngine<{
+    const acroRes = await runFormifyNodeEngine<{
       createdWidgets: number;
       validation: { validPdf: boolean; hasAcroFormDict: boolean };
     }>("generate-acroform", {
@@ -419,7 +419,7 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     expect(acroRes.validation.validPdf).toBe(true);
     expect(acroRes.validation.hasAcroFormDict).toBe(true);
 
-    const renderRes = await runFormForgeNodeEngine<{
+    const renderRes = await runFormifyNodeEngine<{
       populatedWidgets: number;
       flattened: boolean;
     }>("render-pdf", {
@@ -445,7 +445,7 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     const beforeRow = db
       .prepare("SELECT storage_key, sha256 FROM supporting_documents WHERE id = ?")
       .get(targetId) as { storage_key: string; sha256: string };
-    const oldAbsPath = path.join(formforgeStorageDir, ...beforeRow.storage_key.split("/"));
+    const oldAbsPath = path.join(formifyStorageDir, ...beforeRow.storage_key.split("/"));
     expect(fs.existsSync(oldAbsPath)).toBe(true);
 
     // Reject spoofed payload on PUT
@@ -519,7 +519,7 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     const newRow = db
       .prepare("SELECT storage_key FROM supporting_documents WHERE id = ?")
       .get(targetId) as { storage_key: string };
-    const newAbsPath = path.join(formforgeStorageDir, ...newRow.storage_key.split("/"));
+    const newAbsPath = path.join(formifyStorageDir, ...newRow.storage_key.split("/"));
     expect(fs.existsSync(newAbsPath)).toBe(true);
 
     const delRes = await fetch(`${baseUrl}/api/v1/supporting-documents/${targetId}`, {

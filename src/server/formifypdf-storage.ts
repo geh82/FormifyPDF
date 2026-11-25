@@ -42,7 +42,7 @@ export async function isRegularNonSymlinkFile(filePath: string): Promise<boolean
   }
 }
 
-export type FormForgeStorageClass =
+export type FormifyStorageClass =
   | "originals"
   | "acroforms"
   | "renders"
@@ -50,17 +50,17 @@ export type FormForgeStorageClass =
   | "supporting"
   | "thumbnails";
 
-export function getFormForgeStorageRoot(overrideRoot?: string): string {
+export function getFormifyStorageRoot(overrideRoot?: string): string {
   return path.resolve(
     overrideRoot ||
-      process.env.FORMFORGE_STORAGE_DIR ||
-      path.join(process.cwd(), "storage", "formforge")
+      process.env.FORMIFYPDF_STORAGE_DIR ||
+      path.join(process.cwd(), "storage", "formifypdf")
   );
 }
 
 export function ensureStorageDirs(rootDir?: string): string {
-  const root = getFormForgeStorageRoot(rootDir);
-  const subdirs: FormForgeStorageClass[] = [
+  const root = getFormifyStorageRoot(rootDir);
+  const subdirs: FormifyStorageClass[] = [
     "originals",
     "acroforms",
     "renders",
@@ -200,7 +200,7 @@ export function validateSupportingFileSignature(
 }
 
 export function saveStorageBuffer(
-  classification: FormForgeStorageClass,
+  classification: FormifyStorageClass,
   filename: string,
   buffer: Buffer,
   rootDir?: string

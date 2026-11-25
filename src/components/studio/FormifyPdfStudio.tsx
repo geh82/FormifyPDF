@@ -29,7 +29,7 @@ import type {
   DocumentPageInfo,
   FieldManifest,
   RoleName,
-} from "../../lib/formforge/types.ts";
+} from "../../lib/formifypdf/types.ts";
 import { AuthGate } from "./AuthGate.tsx";
 import { DocumentPreviewAndValidation } from "./DocumentPreviewAndValidation.tsx";
 import { PdfFieldEditor } from "./PdfFieldEditor.tsx";
@@ -65,7 +65,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-export function FormForgeStudio() {
+export function FormifyPdfStudio() {
   const apiRef = useRef<StudioApiClient>(new StudioApiClient());
   const api = apiRef.current;
 
@@ -88,6 +88,7 @@ export function FormForgeStudio() {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
 
   // Convert PDF upload & job polling
+  const [selectedPdfFile, setSelectedPdfFile] = useState<File | null>(null);
   const [uploadTitle, setUploadTitle] = useState("");
   const [enableOcr, setEnableOcr] = useState(true);
   const [forceOcr, setForceOcr] = useState(false);
@@ -95,6 +96,15 @@ export function FormForgeStudio() {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [activeJob, setActiveJob] = useState<JobRecord | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [downloadingAcroForm, setDownloadingAcroForm] = useState(false);
+  const [convertedSummary, setConvertedSummary] = useState<{
+    documentId: string;
+    title: string;
+    originalFilename: string;
+    pageCount: number;
+    fieldCount: number;
+    widgetCount: number;
+  } | null>(null);
 
   // Document Analysis detail state
   const [docDetail, setDocDetail] = useState<{
@@ -195,7 +205,7 @@ export function FormForgeStudio() {
         setUser(status.user);
       }
     } catch (err) {
-      setStudioError(err instanceof Error ? err.message : "Failed to connect to FormForge API");
+      setStudioError(err instanceof Error ? err.message : "Failed to connect to FormifyPDF API");
     }
   }, [api]);
 
@@ -248,13 +258,32 @@ export function FormForgeStudio() {
           `/api/v1/jobs/${activeJob.id}`
         );
         setActiveJob(res.job);
-        if (res.job.status === "completed" || res.job.status === "failed") {
+        if (res.job.status === "completed") {
+          try {
+            const detail = await api.json<{
+              ok: boolean;
+              document: DocumentRecord;
+              latestAsset?: { widget_count?: number | null };
+            }>(`/api/v1/documents/${res.job.document_id}`);
+            setConvertedSummary({
+              documentId: res.job.document_id,
+              title: detail.document.title || "Converted PDF",
+              originalFilename: detail.document.original_filename || "document.pdf",
+              pageCount: Number(detail.document.page_count || 1),
+              fieldCount: Number(detail.document.latest_field_count || 0),
+              widgetCount: Number(detail.latestAsset?.widget_count || 0),
+            });
+          } catch {
+            // fallback summary if doc detail lookup races
+          }
+          void refreshCoreLists();
+        } else if (res.job.status === "failed") {
           void refreshCoreLists();
         }
       } catch {
         // ignore transient poll failure
       }
-    }, 900);
+    }, 600);
     return () => clearInterval(timer);
   }, [activeJob, api, refreshCoreLists]);
 
@@ -416,9 +445,34 @@ export function FormForgeStudio() {
     };
   }, [renderedPreviewUrl]);
 
+  const handleSelectPdfFile = (file: File | null) => {
+    setUploadError(null);
+    setNotice(null);
+    setActiveJob(null);
+    setConvertedSummary(null);
+    if (!file) {
+      setSelectedPdfFile(null);
+      return;
+    }
+    const isPdfType =
+      file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+    if (!isPdfType) {
+      setSelectedPdfFile(null);
+      setUploadError("Please select a valid .pdf file.");
+      return;
+    }
+    if (file.size <= 0) {
+      setSelectedPdfFile(null);
+      setUploadError("The selected PDF file is empty.");
+      return;
+    }
+    setSelectedPdfFile(file);
+  };
+
   const handleUploadPdf = async (file: File) => {
     setUploadError(null);
     setNotice(null);
+    setConvertedSummary(null);
     setUploadProgress(0);
     try {
       const res = await api.uploadPdfWithProgress(
@@ -444,12 +498,35 @@ export function FormForgeStudio() {
           created_at: new Date().toISOString(),
         });
       }
-      setNotice(`Uploaded ${res.document.title} (${res.document.pageCount} pages). Analysis started.`);
+      setNotice(`Uploaded ${res.document.title} (${res.document.pageCount} pages). Converting to fillable AcroForm...`);
       await refreshCoreLists();
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setUploadProgress(null);
+    }
+  };
+
+  const handleDownloadAcroFormForDocument = async (
+    documentId: string,
+    titleOrFilename = "document"
+  ) => {
+    setDownloadingAcroForm(true);
+    setUploadError(null);
+    setStudioError(null);
+    try {
+      const slug =
+        titleOrFilename
+          .replace(/\.pdf$/i, "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "") || "document";
+      await handleDownloadProtectedBlob(
+        `/api/v1/documents/${documentId}/acroform-pdf?disposition=attachment`,
+        `${slug}-fillable-acroform.pdf`
+      );
+    } finally {
+      setDownloadingAcroForm(false);
     }
   };
 
@@ -564,19 +641,23 @@ export function FormForgeStudio() {
     mimeType = "application/pdf"
   ) => {
     try {
-      const bytes = await api.fetchPdfBytes(url);
+      const downloaded = await api.fetchFileWithFilename(url, filename);
       const blobUrl = URL.createObjectURL(
-        new Blob([bytes.slice()], { type: mimeType })
+        new Blob([downloaded.bytes.slice()], {
+          type: downloaded.contentType || mimeType,
+        })
       );
       const a = document.createElement("a");
       a.href = blobUrl;
-      a.download = filename;
+      a.download = downloaded.filename || filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(blobUrl), 2500);
     } catch (err) {
-      setStudioError(err instanceof Error ? err.message : "Download failed");
+      const msg = err instanceof Error ? err.message : "Download failed";
+      setStudioError(msg);
+      setUploadError(msg);
     }
   };
 
@@ -683,7 +764,7 @@ export function FormForgeStudio() {
   if (!authStatus) {
     return (
       <div className="rounded-lg border border-slate-200 bg-white p-10 text-center text-sm text-slate-600">
-        Connecting to FormForge AI Studio...
+        Connecting to FormifyPDF Studio...
       </div>
     );
   }
@@ -721,7 +802,7 @@ export function FormForgeStudio() {
       {/* Studio Sub-Header Bar */}
       <div className="border-b border-slate-200 bg-slate-50 px-5 py-3 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3 text-xs text-slate-600">
-          <span className="font-semibold text-slate-900">FormForge AI Studio</span>
+          <span className="font-semibold text-slate-900">FormifyPDF Studio</span>
           <span>·</span>
           <span>{user.fullName}</span>
           <span>·</span>
@@ -748,7 +829,7 @@ export function FormForgeStudio() {
       {/* 240px Sidebar + Workspace Content */}
       <div className="flex flex-col md:flex-row min-h-[720px]">
         <aside className="w-full md:w-60 shrink-0 border-b md:border-b-0 md:border-r border-slate-200 bg-slate-50/60 p-3">
-          <nav aria-label="FormForge Studio Navigation" className="space-y-0.5">
+          <nav aria-label="FormifyPDF Studio Navigation" className="space-y-0.5">
             {navItems.map((item) => {
               const Icon = item.icon;
               const isActive = activeNav === item.id;
@@ -923,89 +1004,180 @@ export function FormForgeStudio() {
             <div className="max-w-3xl space-y-5">
               <div>
                 <h2 className="text-lg font-semibold text-slate-900">
-                  Convert Any PDF to Interactive AcroForm
+                  Convert Any PDF to Fillable AcroForm
                 </h2>
                 <p className="text-xs text-slate-500 mt-1">
-                  Supports native digital PDFs, scanned image-only forms (OpenCV + Tesseract OCR), and mixed vector/tabular documents of any paper size.
+                  1. Select any PDF (digital, scanned, or multi-page) · 2. Click Convert to Fillable PDF · 3. Download your ready-to-fill AcroForm.
                 </p>
               </div>
 
-              <div className="rounded-lg border border-slate-200 p-5 space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-                  <div>
-                    <label className="block font-medium text-slate-700 mb-1">
-                      Document Title (Optional)
-                    </label>
-                    <input
-                      type="text"
-                      value={uploadTitle}
-                      onChange={(e) => setUploadTitle(e.target.value)}
-                      placeholder="e.g. Municipal Clearance Application"
-                      className="w-full rounded-md border border-slate-300 px-3 py-2 text-slate-900"
-                    />
+              <div className="rounded-lg border border-slate-200 p-5 space-y-5">
+                {/* Step 1: Upload / Select PDF */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-slate-900">
+                      01. Upload PDF Document
+                    </span>
+                    <span className="text-slate-500">Digital, scanned, or multi-page · up to 35 MB</span>
                   </div>
-                  <div>
-                    <label className="block font-medium text-slate-700 mb-1">
-                      OCR Language Pack
-                    </label>
-                    <input
-                      type="text"
-                      value={ocrLanguage}
-                      onChange={(e) => setOcrLanguage(e.target.value)}
-                      placeholder="eng"
-                      className="w-full rounded-md border border-slate-300 px-3 py-2 text-slate-900 font-mono"
-                    />
-                  </div>
-                </div>
 
-                <div className="flex flex-wrap items-center gap-6 text-xs text-slate-700">
-                  <label className="inline-flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={enableOcr}
-                      onChange={(e) => setEnableOcr(e.target.checked)}
-                    />
-                    <span>Enable OCR Fallback for scanned / low-text pages</span>
-                  </label>
-                  <label className="inline-flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={forceOcr}
-                      onChange={(e) => setForceOcr(e.target.checked)}
-                    />
-                    <span>Force OCR on all pages</span>
-                  </label>
-                </div>
-
-                <label
-                  htmlFor="formforge-pdf-upload"
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    const f = e.dataTransfer.files?.[0];
-                    if (f) void handleUploadPdf(f);
-                  }}
-                  className="block cursor-pointer rounded-lg border-2 border-dashed border-slate-300 bg-slate-50/70 hover:border-emerald-800 hover:bg-emerald-50/30 p-8 text-center transition-colors"
-                >
-                  <Upload className="mx-auto h-7 w-7 text-emerald-900 mb-2" />
-                  <p className="text-sm font-medium text-slate-900">
-                    Drop a PDF here or click to browse
-                  </p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Up to 35 MB · Automatically inspects pages, detects fields, builds FieldManifest, and generates AcroForm widgets
-                  </p>
-                  <input
-                    id="formforge-pdf-upload"
-                    type="file"
-                    accept="application/pdf,.pdf"
-                    disabled={!hasPermission("documents:write")}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) void handleUploadPdf(f);
+                  <label
+                    htmlFor="formifypdf-pdf-upload"
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const f = e.dataTransfer.files?.[0] || null;
+                      if (f) handleSelectPdfFile(f);
                     }}
-                    className="sr-only"
-                  />
-                </label>
+                    className="block cursor-pointer rounded-lg border-2 border-dashed border-slate-300 bg-slate-50/70 hover:border-emerald-800 hover:bg-emerald-50/30 p-7 text-center transition-colors"
+                  >
+                    <Upload className="mx-auto h-7 w-7 text-emerald-900 mb-2" aria-hidden="true" />
+                    <p className="text-sm font-medium text-slate-900">
+                      {selectedPdfFile ? selectedPdfFile.name : "Drop a PDF here or click to select a file"}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {selectedPdfFile
+                        ? `${formatBytes(selectedPdfFile.size)} · Ready to convert`
+                        : "Supports native digital PDFs, scanned forms with OCR, and character-box grids"}
+                    </p>
+                    <input
+                      id="formifypdf-pdf-upload"
+                      type="file"
+                      accept="application/pdf,.pdf"
+                      disabled={!hasPermission("documents:write")}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0] || null;
+                        handleSelectPdfFile(f);
+                      }}
+                      className="sr-only"
+                    />
+                  </label>
+
+                  {selectedPdfFile && (
+                    <div className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs">
+                      <div className="min-w-0 flex items-center gap-2 text-slate-700">
+                        <FileText className="h-4 w-4 text-emerald-900 shrink-0" aria-hidden="true" />
+                        <span className="font-medium text-slate-900 truncate">
+                          {selectedPdfFile.name}
+                        </span>
+                        <span className="text-slate-400">·</span>
+                        <span className="tabular-nums text-slate-500 shrink-0">
+                          {formatBytes(selectedPdfFile.size)}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectPdfFile(null)}
+                        className="text-slate-600 hover:text-slate-900 font-medium whitespace-nowrap shrink-0"
+                      >
+                        Change File
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Optional Document & OCR Settings */}
+                <div className="border-t border-slate-100 pt-4 space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                    <div>
+                      <label className="block font-medium text-slate-700 mb-1">
+                        Document Title (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={uploadTitle}
+                        onChange={(e) => setUploadTitle(e.target.value)}
+                        placeholder={
+                          selectedPdfFile
+                            ? selectedPdfFile.name.replace(/\.pdf$/i, "")
+                            : "e.g. Municipal Clearance Application"
+                        }
+                        className="w-full rounded-md border border-slate-300 px-3 py-2 text-slate-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium text-slate-700 mb-1">
+                        OCR Language Pack
+                      </label>
+                      <input
+                        type="text"
+                        value={ocrLanguage}
+                        onChange={(e) => setOcrLanguage(e.target.value)}
+                        placeholder="eng"
+                        className="w-full rounded-md border border-slate-300 px-3 py-2 text-slate-900 font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-6 text-xs text-slate-700">
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={enableOcr}
+                        onChange={(e) => setEnableOcr(e.target.checked)}
+                      />
+                      <span>Enable OCR Fallback for scanned / low-text pages</span>
+                    </label>
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={forceOcr}
+                        onChange={(e) => setForceOcr(e.target.checked)}
+                      />
+                      <span>Force OCR on all pages</span>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Step 2: Convert Action */}
+                <div className="border-t border-slate-100 pt-4 flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-xs text-slate-600">
+                    <span className="font-semibold text-slate-900">02. Convert</span>{" "}
+                    <span>
+                      — Detects fields, builds FieldManifest, and generates a fillable AcroForm PDF.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={
+                      !selectedPdfFile ||
+                      !hasPermission("documents:write") ||
+                      uploadProgress !== null ||
+                      Boolean(
+                        activeJob &&
+                          activeJob.status !== "completed" &&
+                          activeJob.status !== "failed"
+                      )
+                    }
+                    onClick={() => {
+                      if (selectedPdfFile) {
+                        void handleUploadPdf(selectedPdfFile);
+                      }
+                    }}
+                    className="inline-flex items-center gap-2 rounded-md bg-emerald-900 px-4 py-2.5 text-xs font-medium text-white hover:bg-emerald-800 disabled:opacity-50 whitespace-nowrap shrink-0 min-h-[40px]"
+                  >
+                    <RefreshCw
+                      className={`h-3.5 w-3.5 ${
+                        uploadProgress !== null ||
+                        (activeJob &&
+                          activeJob.status !== "completed" &&
+                          activeJob.status !== "failed")
+                          ? "animate-spin"
+                          : ""
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <span>
+                      {uploadProgress !== null
+                        ? `Uploading (${uploadProgress}%)...`
+                        : activeJob &&
+                          activeJob.status !== "completed" &&
+                          activeJob.status !== "failed"
+                        ? "Converting to Fillable PDF..."
+                        : "Convert to Fillable PDF"}
+                    </span>
+                  </button>
+                </div>
 
                 {uploadProgress !== null && (
                   <div className="space-y-1">
@@ -1025,22 +1197,40 @@ export function FormForgeStudio() {
                 {uploadError && (
                   <div
                     role="alert"
-                    className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800"
+                    className="rounded-md border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs text-red-800"
                   >
                     {uploadError}
                   </div>
                 )}
 
                 {activeJob && (
-                  <div className="rounded-md border border-slate-200 bg-slate-50 p-4 space-y-2">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-slate-900">
-                        Analysis Pipeline Status: {activeJob.stage}
+                  <div
+                    className={`rounded-md border p-4 space-y-3 ${
+                      activeJob.status === "completed"
+                        ? "border-emerald-200 bg-emerald-50/60"
+                        : activeJob.status === "failed"
+                        ? "border-red-200 bg-red-50/70"
+                        : "border-slate-200 bg-slate-50"
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <span className="font-semibold text-slate-900 inline-flex items-center gap-1.5">
+                        {activeJob.status === "completed" && (
+                          <CheckCircle2 className="h-4 w-4 text-emerald-700" aria-hidden="true" />
+                        )}
+                        <span>
+                          {activeJob.status === "completed"
+                            ? "03. Conversion Complete — Fillable AcroForm Ready"
+                            : activeJob.status === "failed"
+                            ? "Conversion Failed"
+                            : `Conversion Stage: ${activeJob.stage}`}
+                        </span>
                       </span>
                       <span className="font-mono tabular-nums text-slate-700">
                         {activeJob.progress_pct}% ({activeJob.status})
                       </span>
                     </div>
+
                     <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
                       <div
                         className={`h-full transition-all ${
@@ -1049,31 +1239,106 @@ export function FormForgeStudio() {
                         style={{ width: `${activeJob.progress_pct}%` }}
                       />
                     </div>
+
                     {activeJob.error_message && (
-                      <p className="text-xs text-rose-700">{activeJob.error_message}</p>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs text-rose-800">{activeJob.error_message}</p>
+                        {hasPermission("documents:write") && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await api.json(`/api/v1/jobs/${activeJob.id}/retry`, {
+                                  method: "POST",
+                                });
+                                setActiveJob({
+                                  ...activeJob,
+                                  status: "queued",
+                                  stage: "queued",
+                                  progress_pct: 5,
+                                  error_message: null,
+                                });
+                              } catch (err) {
+                                setUploadError(
+                                  err instanceof Error ? err.message : "Retry failed"
+                                );
+                              }
+                            }}
+                            className="rounded-md border border-rose-300 bg-white px-3 py-1.5 text-xs font-medium text-rose-800 hover:bg-rose-50 whitespace-nowrap"
+                          >
+                            Retry Conversion
+                          </button>
+                        )}
+                      </div>
                     )}
+
                     {activeJob.status === "completed" && (
-                      <div className="pt-1 flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedDocId(activeJob.document_id);
-                            setActiveNav("editor");
-                          }}
-                          className="rounded-md bg-emerald-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-800"
-                        >
-                          Open Visual Field Editor
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedDocId(activeJob.document_id);
-                            setActiveNav("analysis");
-                          }}
-                          className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50"
-                        >
-                          Inspect Page Geometry
-                        </button>
+                      <div className="space-y-3 pt-1">
+                        {convertedSummary && (
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-700 tabular-nums">
+                            <span className="font-medium text-slate-900">
+                              {convertedSummary.title}
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span>{convertedSummary.pageCount} pages</span>
+                            <span aria-hidden="true">·</span>
+                            <span>{convertedSummary.fieldCount} detected fields</span>
+                            <span aria-hidden="true">·</span>
+                            <span>{convertedSummary.widgetCount} AcroForm widgets</span>
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={downloadingAcroForm}
+                            onClick={() =>
+                              void handleDownloadAcroFormForDocument(
+                                activeJob.document_id,
+                                convertedSummary?.title ||
+                                  uploadTitle.trim() ||
+                                  selectedPdfFile?.name ||
+                                  "document"
+                              )
+                            }
+                            className="inline-flex items-center gap-1.5 rounded-md bg-emerald-900 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-800 disabled:opacity-50 whitespace-nowrap shrink-0"
+                          >
+                            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>
+                              {downloadingAcroForm ? "Preparing AcroForm..." : "Download AcroForm"}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedDocId(activeJob.document_id);
+                              setActiveNav("editor");
+                            }}
+                            className="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap"
+                          >
+                            Open Visual Field Editor
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedDocId(activeJob.document_id);
+                              setActiveNav("validation");
+                            }}
+                            className="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap"
+                          >
+                            Preview & Validate
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedDocId(activeJob.document_id);
+                              setActiveNav("analysis");
+                            }}
+                            className="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap"
+                          >
+                            Inspect Page Geometry
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1127,7 +1392,23 @@ export function FormForgeStudio() {
                       </span>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {selectedDocId && (
+                        <button
+                          type="button"
+                          disabled={downloadingAcroForm}
+                          onClick={() =>
+                            void handleDownloadAcroFormForDocument(
+                              selectedDocId,
+                              String(docDetail.document.title || "document")
+                            )
+                          }
+                          className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-800 hover:bg-slate-100 whitespace-nowrap"
+                        >
+                          <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                          Download AcroForm
+                        </button>
+                      )}
                       {hasPermission("documents:write") && (
                         <button
                           type="button"

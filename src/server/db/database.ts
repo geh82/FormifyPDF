@@ -1,8 +1,7 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { RoleName } from "../../lib/formforge/types.ts";
+import type { RoleName } from "../../lib/formifypdf/types.ts";
 
 let cachedDb: DatabaseSync | null = null;
 let cachedDbPath: string | null = null;
@@ -10,8 +9,8 @@ let cachedDbPath: string | null = null;
 export function getDatabasePath(overridePath?: string): string {
   return path.resolve(
     overridePath ||
-      process.env.FORMFORGE_DB_PATH ||
-      path.join(process.cwd(), "storage", "formforge.sqlite")
+      process.env.FORMIFYPDF_DB_PATH ||
+      path.join(process.cwd(), "storage", "formifypdf.sqlite")
   );
 }
 
@@ -79,7 +78,7 @@ function runMigrations(db: DatabaseSync) {
     const existing = checkStmt.get(file) as { version: string } | undefined;
     if (existing) continue;
     const sql = fs.readFileSync(path.join(migrationsDir, file), "utf-8");
-    db.exec("BEGIN;");
+    db.exec("BEGIN IMMEDIATE;");
     try {
       db.exec(sql);
       insertStmt.run(file);
@@ -210,52 +209,6 @@ function seedBaselineData(db: DatabaseSync) {
   }
 
 }
-
-type RawRectInput =
-  | [number, number, number, number]
-  | { x0: number; y0: number; x1: number; y1: number };
-
-function toTopLeftRect(raw: RawRectInput | undefined): {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-} | null {
-  if (!raw) return null;
-  let x0: number;
-  let y0: number;
-  let x1: number;
-  let y1: number;
-  if (Array.isArray(raw) && raw.length >= 4) {
-    [x0, y0, x1, y1] = raw.map(Number);
-  } else if (typeof raw === "object" && "x0" in raw) {
-    x0 = Number(raw.x0);
-    y0 = Number(raw.y0);
-    x1 = Number(raw.x1);
-    y1 = Number(raw.y1);
-  } else {
-    return null;
-  }
-  if (![x0, y0, x1, y1].every(Number.isFinite)) return null;
-  const round = (n: number) => Math.round(n * 100) / 100;
-  return {
-    x: round(x0),
-    y: round(y0),
-    width: round(Math.max(1, x1 - x0)),
-    height: round(Math.max(1, y1 - y0)),
-    x0,
-    y0,
-    x1,
-    y1,
-  };
-}
-
-
-
 
 export function getRolePermissions(db: DatabaseSync, roleName: string): string[] {
   const rows = db

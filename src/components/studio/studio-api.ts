@@ -4,7 +4,7 @@ import type {
   DocumentPageInfo,
   FieldManifest,
   RoleName,
-} from "../../lib/formforge/types.ts";
+} from "../../lib/formifypdf/types.ts";
 
 export interface AuthUser {
   id: string | null;
@@ -116,9 +116,39 @@ export class StudioApiClient {
   async fetchPdfBytes(url: string): Promise<Uint8Array> {
     const res = await fetch(url, { headers: this.headers() });
     if (!res.ok) {
-      throw new Error(`Failed to load PDF (${res.status})`);
+      const errBody = await res.json().catch(() => null) as { error?: string } | null;
+      throw new Error(errBody?.error || `Failed to load PDF (${res.status})`);
     }
     return new Uint8Array(await res.arrayBuffer());
+  }
+
+  async fetchFileWithFilename(
+    url: string,
+    fallbackFilename: string
+  ): Promise<{ bytes: Uint8Array; filename: string; contentType: string }> {
+    const res = await fetch(url, { headers: this.headers() });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => null) as { error?: string } | null;
+      throw new Error(errBody?.error || `Download failed (${res.status})`);
+    }
+    const disposition = res.headers.get("content-disposition") || "";
+    let filename = fallbackFilename;
+    const utf8Match = disposition.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+    const plainMatch = disposition.match(/filename\s*=\s*"?([^";]+)"?/i);
+    if (utf8Match?.[1]) {
+      try {
+        filename = decodeURIComponent(utf8Match[1].trim());
+      } catch {
+        filename = utf8Match[1].trim();
+      }
+    } else if (plainMatch?.[1]) {
+      filename = plainMatch[1].trim();
+    }
+    return {
+      bytes: new Uint8Array(await res.arrayBuffer()),
+      filename: filename || fallbackFilename,
+      contentType: res.headers.get("content-type") || "application/pdf",
+    };
   }
 
   uploadPdfWithProgress(

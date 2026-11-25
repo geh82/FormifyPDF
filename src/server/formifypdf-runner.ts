@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runFormForgeNodeEngine } from "./formforge-node-engine.ts";
+import { runFormifyNodeEngine } from "./formifypdf-node-engine.ts";
 
 export type EngineCommand =
   | "inspect"
@@ -26,19 +26,76 @@ function isMissingPythonDepsError(msg: string): boolean {
   );
 }
 
-export async function runFormForgePythonEngine<T = unknown>(
+let cachedPythonBin: string | null = null;
+let cachedPythonDepsAvailable: boolean | null = null;
+
+export function resetPythonAvailabilityCache(): void {
+  cachedPythonBin = null;
+  cachedPythonDepsAvailable = null;
+}
+
+async function hasPythonPdfDependencies(pythonBin: string): Promise<boolean> {
+  if (cachedPythonBin === pythonBin && cachedPythonDepsAvailable !== null) {
+    return cachedPythonDepsAvailable;
+  }
+
+  const available = await new Promise<boolean>((resolve) => {
+    const child = spawn(
+      pythonBin,
+      ["-c", "import fitz, pypdf, pdfplumber, cv2, pytesseract"],
+      {
+        stdio: "ignore",
+        env: {
+          ...process.env,
+          PYTHONUTF8: "1",
+          PYTHONIOENCODING: "utf-8",
+        },
+      }
+    );
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+      resolve(false);
+    }, 3000);
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+  });
+
+  cachedPythonBin = pythonBin;
+  cachedPythonDepsAvailable = available;
+  return available;
+}
+
+export async function runFormifyPythonEngine<T = unknown>(
   command: EngineCommand,
   payload: Record<string, unknown>,
   options: { timeoutMs?: number; scriptPath?: string; pythonExecutable?: string } = {}
 ): Promise<T> {
   const scriptPath =
     options.scriptPath ||
-    path.resolve(process.cwd(), "python", "formforge_engine.py");
+    path.resolve(process.cwd(), "python", "formifypdf_engine.py");
   const pythonBin = options.pythonExecutable || detectPythonExecutable();
   const timeoutMs =
     options.timeoutMs ?? Number(process.env.PYTHON_TIMEOUT_MS || "60000");
 
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "formforge-py-"));
+  // Fast path: when using default Python + script and Python PDF libraries are absent,
+  // route directly to the built-in Node engine without paying process spawn overhead.
+  if (!options.scriptPath && !options.pythonExecutable) {
+    if (!fs.existsSync(scriptPath) || !(await hasPythonPdfDependencies(pythonBin))) {
+      return await runFormifyNodeEngine<T>(command, payload);
+    }
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "formifypdf-py-"));
   const id = crypto.randomBytes(6).toString("hex");
   const inputJsonPath = path.join(tempDir, `in_${id}.json`);
   const outputJsonPath = path.join(tempDir, `out_${id}.json`);
@@ -61,6 +118,8 @@ export async function runFormForgePythonEngine<T = unknown>(
           env: {
             ...process.env,
             PYTHONUNBUFFERED: "1",
+            PYTHONUTF8: "1",
+            PYTHONIOENCODING: "utf-8",
           },
         }
       );
@@ -70,7 +129,11 @@ export async function runFormForgePythonEngine<T = unknown>(
 
       const timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGKILL");
+        try {
+          child.kill(process.platform === "win32" ? undefined : "SIGKILL");
+        } catch {
+          // ignore kill error if process already exited
+        }
       }, timeoutMs);
 
       child.stderr.on("data", (chunk: Buffer) => {
@@ -115,7 +178,9 @@ export async function runFormForgePythonEngine<T = unknown>(
         !options.pythonExecutable &&
         isMissingPythonDepsError(stderr)
       ) {
-        return await runFormForgeNodeEngine<T>(command, payload);
+        cachedPythonBin = pythonBin;
+        cachedPythonDepsAvailable = false;
+        return await runFormifyNodeEngine<T>(command, payload);
       }
       throw new Error(stderr || `Python engine exited with code ${exitCode}`);
     }
@@ -128,7 +193,9 @@ export async function runFormForgePythonEngine<T = unknown>(
       !options.pythonExecutable &&
       isMissingPythonDepsError(msg)
     ) {
-      return await runFormForgeNodeEngine<T>(command, payload);
+      cachedPythonBin = pythonBin;
+      cachedPythonDepsAvailable = false;
+      return await runFormifyNodeEngine<T>(command, payload);
     }
     throw err;
   } finally {

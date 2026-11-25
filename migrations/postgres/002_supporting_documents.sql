@@ -1,4 +1,4 @@
--- FormForge AI PostgreSQL Production Migration 002
+-- FormifyPDF PostgreSQL Production Migration 002
 CREATE TABLE IF NOT EXISTS supporting_documents (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

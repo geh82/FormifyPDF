@@ -1,17 +1,15 @@
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { PDFDocument, PDFName, StandardFonts, rgb } from "pdf-lib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../../server.ts";
 import { resetDatabaseCache } from "../../src/server/db/database.ts";
 
-const pythonBin = process.platform === "win32" ? "python" : "python3";
-
-describe("FormForge AI /api/v1 REST, RBAC, Conversion & Engine B Lifecycle", () => {
+describe("FormifyPDF /api/v1 REST, RBAC, Conversion & Engine B Lifecycle", () => {
   let tmpRoot: string;
-  let server: http.Server;
+  let server: http.Server | undefined;
   let baseUrl: string;
   let samplePdfBuffer: Buffer;
   let adminToken = "";
@@ -22,37 +20,56 @@ describe("FormForge AI /api/v1 REST, RBAC, Conversion & Engine B Lifecycle", () 
   let renderedGenId = "";
 
   beforeAll(async () => {
-    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "formforge-v1-test-"));
-    process.env.FORMFORGE_STORAGE_DIR = path.join(tmpRoot, "storage");
-    process.env.FORMFORGE_DB_PATH = path.join(tmpRoot, "formforge_test.db");
-    delete process.env.FORMFORGE_ADMIN_PASSWORD;
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "formifypdf-v1-test-"));
+    process.env.FORMIFYPDF_STORAGE_DIR = path.join(tmpRoot, "storage");
+    process.env.FORMIFYPDF_DB_PATH = path.join(tmpRoot, "formifypdf_test.db");
+    delete process.env.FORMIFYPDF_ADMIN_PASSWORD;
     resetDatabaseCache();
 
-    // Generate clean 1-page unfamiliar PDF in tmpRoot
-    const pdfPath = path.join(tmpRoot, "contract_intake.pdf");
-    execFileSync(
-      pythonBin,
-      [
-        "-c",
-        `import fitz
+    // Generate clean 1-page unfamiliar digital PDF in tmpRoot via pdf-lib
+    const doc = await PDFDocument.create();
+    const p = doc.addPage([595.28, 841.89]);
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    p.drawText("CLIENT INTAKE FORM - PLEASE COMPLETE ALL REQUIRED FIELDS BELOW", {
+      x: 45,
+      y: 841.89 - 70,
+      size: 12,
+      font,
+    });
+    p.drawText("Full Legal Name:", { x: 45, y: 841.89 - 120, size: 10, font });
+    p.drawLine({
+      start: { x: 165, y: 841.89 - 123 },
+      end: { x: 450, y: 841.89 - 123 },
+      thickness: 1.0,
+      color: rgb(0, 0, 0),
+    });
+    p.drawText("Primary Email Address:", { x: 45, y: 841.89 - 150, size: 10, font });
+    p.drawRectangle({
+      x: 165,
+      y: 841.89 - 156,
+      width: 285,
+      height: 18,
+      borderWidth: 0.8,
+      borderColor: rgb(0, 0, 0),
+    });
+    p.drawText("Accept Policy:", { x: 45, y: 841.89 - 190, size: 10, font });
+    p.drawRectangle({
+      x: 165,
+      y: 841.89 - 191,
+      width: 13,
+      height: 13,
+      borderWidth: 0.8,
+      borderColor: rgb(0, 0, 0),
+    });
 
-d = fitz.open()
-p = d.new_page(width=595.28, height=841.89)
-p.insert_text((45, 70), "CLIENT INTAKE FORM", fontsize=13)
-p.insert_text((45, 120), "Full Legal Name:", fontsize=10)
-p.draw_line((165, 123), (450, 123), width=1.0)
-p.insert_text((45, 160), "Accept Policy:", fontsize=10)
-p.draw_rect(fitz.Rect(165, 148, 178, 161), width=0.8)
-d.save(${JSON.stringify(pdfPath)})`,
-      ],
-      { stdio: "pipe" }
-    );
-    samplePdfBuffer = fs.readFileSync(pdfPath);
+    const pdfPath = path.join(tmpRoot, "contract_intake.pdf");
+    samplePdfBuffer = Buffer.from(await doc.save({ useObjectStreams: false }));
+    fs.writeFileSync(pdfPath, samplePdfBuffer);
 
     const app = await createApp({ disableRateLimit: true });
     await new Promise<void>((resolve) => {
       server = app.listen(0, "127.0.0.1", () => {
-        const addr = server.address();
+        const addr = server?.address();
         if (addr && typeof addr === "object") {
           baseUrl = `http://127.0.0.1:${addr.port}`;
         }
@@ -62,14 +79,22 @@ d.save(${JSON.stringify(pdfPath)})`,
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server) {
+      await new Promise<void>((resolve) => server!.close(() => resolve()));
+    }
     resetDatabaseCache();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
-    delete process.env.FORMFORGE_STORAGE_DIR;
-    delete process.env.FORMFORGE_DB_PATH;
+    delete process.env.FORMIFYPDF_STORAGE_DIR;
+    delete process.env.FORMIFYPDF_DB_PATH;
   });
 
-  it("exposes OpenAPI 3.1 spec, requires auth on protected endpoints, and enforces one-time admin bootstrap + RBAC", async () => {
+  it("exposes /api/health and OpenAPI 3.1 spec, requires auth on protected endpoints, and enforces one-time admin bootstrap + RBAC", async () => {
+    const healthRes = await fetch(`${baseUrl}/api/health`);
+    expect(healthRes.status).toBe(200);
+    const healthJson = await healthRes.json();
+    expect(healthJson.ok).toBe(true);
+    expect(healthJson.status).toBe("healthy");
+
     const specRes = await fetch(`${baseUrl}/api/v1/openapi.json`);
     expect(specRes.status).toBe(200);
     const spec = await specRes.json();
@@ -89,7 +114,7 @@ d.save(${JSON.stringify(pdfPath)})`,
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        email: "chief@formforge.test",
+        email: "chief@formifypdf.test",
         fullName: "Chief Architect",
         password: "StrongPassword123!",
         organisationName: "Acme Testing Org",
@@ -121,7 +146,7 @@ d.save(${JSON.stringify(pdfPath)})`,
         Authorization: `Bearer ${adminToken}`,
       },
       body: JSON.stringify({
-        email: "viewer@formforge.test",
+        email: "viewer@formifypdf.test",
         fullName: "Read Only Viewer",
         role: "read_only_user",
         password: "ViewerPassword123!",
@@ -134,7 +159,7 @@ d.save(${JSON.stringify(pdfPath)})`,
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          email: "viewer@formforge.test",
+          email: "viewer@formifypdf.test",
           password: "ViewerPassword123!",
         }),
       })
@@ -148,7 +173,7 @@ d.save(${JSON.stringify(pdfPath)})`,
         Authorization: `Bearer ${readonlyToken}`,
       },
       body: JSON.stringify({
-        email: "denied@formforge.test",
+        email: "denied@formifypdf.test",
         fullName: "Should Fail",
         role: "read_only_user",
         password: "ReadOnlyPassword123!",
@@ -181,7 +206,7 @@ d.save(${JSON.stringify(pdfPath)})`,
 
     // Poll job to completion
     let jobStatus = "queued";
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 80; i++) {
       const jr = await (
         await fetch(`${baseUrl}/api/v1/jobs/${jobId}`, {
           headers: { Authorization: `Bearer ${adminToken}` },
@@ -192,6 +217,22 @@ d.save(${JSON.stringify(pdfPath)})`,
       await new Promise((r) => setTimeout(r, 250));
     }
     expect(jobStatus).toBe("completed");
+
+    // Immediately download converted fillable AcroForm PDF and verify valid PDF + AcroForm widgets
+    const acroDownloadRes = await fetch(
+      `${baseUrl}/api/v1/documents/${uploadedDocId}/acroform-pdf?disposition=attachment`,
+      { headers: { Authorization: `Bearer ${adminToken}` } }
+    );
+    expect(acroDownloadRes.status).toBe(200);
+    expect(acroDownloadRes.headers.get("content-type")).toBe("application/pdf");
+    expect(acroDownloadRes.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(acroDownloadRes.headers.get("content-disposition")).toContain("attachment");
+    expect(acroDownloadRes.headers.get("content-disposition")).toContain("-fillable-acroform.pdf");
+    const acroDownloadBuf = Buffer.from(await acroDownloadRes.arrayBuffer());
+    expect(acroDownloadBuf.subarray(0, 5).toString("ascii")).toBe("%PDF-");
+    const loadedAcroDoc = await PDFDocument.load(acroDownloadBuf);
+    expect(loadedAcroDoc.catalog.lookup(PDFName.of("AcroForm"))).toBeTruthy();
+    expect(loadedAcroDoc.getForm().getFields().length).toBeGreaterThanOrEqual(2);
 
     // Fetch manifest
     const manRes = await (
@@ -283,7 +324,7 @@ d.save(${JSON.stringify(pdfPath)})`,
       })
     ).json();
     apiKeySecret = keyRes.apiKey.secretKey;
-    expect(apiKeySecret.startsWith("ffk_")).toBe(true);
+    expect(apiKeySecret.startsWith("fpk_")).toBe(true);
 
     const reqFieldName = editedFields[0].name;
     const renderRes = await fetch(`${baseUrl}/api/v1/render/${createdTemplateId}`, {
@@ -300,7 +341,7 @@ d.save(${JSON.stringify(pdfPath)})`,
     expect(renderRes.status).toBe(201);
     const renderJson = await renderRes.json();
     renderedGenId = renderJson.generatedDocumentId;
-    expect(renderJson.reference).toMatch(/^FF-/);
+    expect(renderJson.reference).toMatch(/^FP-/);
 
     // Download generated PDF
     const dlRes = await fetch(`${baseUrl}${renderJson.downloadUrl}`, {

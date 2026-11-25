@@ -24,24 +24,24 @@ import {
   normalizeRotation,
   roundPt,
   topLeftPdfToBottomLeftPdf,
-} from "../lib/formforge/coordinate.ts";
+} from "../lib/formifypdf/coordinate.ts";
 import type {
   AcroFormValidationReport,
   DetectedFormField,
   DocumentPageInfo,
   FieldManifest,
-  FormForgeFieldType,
+  FormifyFieldType,
   PdfRect,
   VisualAlignmentIssue,
   VisualOverlapWarning,
   VisualVerificationReport,
-} from "../lib/formforge/types.ts";
+} from "../lib/formifypdf/types.ts";
 import {
   buildDetectionSummary,
   buildMergedTextLabels,
   fuseAndClassifyPageGeometry,
   snakeCase,
-} from "./formforge-fusion.ts";
+} from "./formifypdf-fusion.ts";
 import { createLocalOcrSession, type LocalOcrSession } from "./pdf-local-ocr.ts";
 import {
   getPdfJsDocumentOptions,
@@ -108,6 +108,7 @@ async function loadPdfDocument(pdfPath: string): Promise<{
   bytes: Buffer;
   pdfDoc: PDFDocument;
   pdfjsDoc: pdfjsLib.PDFDocumentProxy;
+  closePdfJs: () => Promise<void>;
 }> {
   if (!fs.existsSync(pdfPath)) {
     throw new Error(`PDF_NOT_FOUND: File not found at ${pdfPath}`);
@@ -133,7 +134,12 @@ async function loadPdfDocument(pdfPath: string): Promise<{
   );
   const pdfjsDoc = await loadingTask.promise;
 
-  return { bytes, pdfDoc, pdfjsDoc };
+  const closePdfJs = async () => {
+    await Promise.resolve(pdfjsDoc.cleanup?.()).catch(() => {});
+    await Promise.resolve(loadingTask.destroy?.()).catch(() => {});
+  };
+
+  return { bytes, pdfDoc, pdfjsDoc, closePdfJs };
 }
 
 function extractExistingSignatureWidgets(
@@ -141,12 +147,12 @@ function extractExistingSignatureWidgets(
   pageIdx: number,
   cropBox: { x: number; y: number; width: number; height: number },
   rotation: 0 | 90 | 180 | 270
-): Array<{ name: string; type: FormForgeFieldType; rect: PdfRect }> {
+): Array<{ name: string; type: FormifyFieldType; rect: PdfRect }> {
   const page = pdfDoc.getPage(pageIdx);
   const annots = page.node.lookupMaybe(PDFName.of("Annots"), PDFArray);
   if (!annots) return [];
 
-  const results: Array<{ name: string; type: FormForgeFieldType; rect: PdfRect }> = [];
+  const results: Array<{ name: string; type: FormifyFieldType; rect: PdfRect }> = [];
   for (let i = 0; i < annots.size(); i++) {
     const dict = annots.lookupMaybe(i, PDFDict);
     if (!dict) continue;
@@ -172,7 +178,7 @@ function extractExistingSignatureWidgets(
 }
 
 async function inspectPdfNode(pdfPath: string) {
-  const { bytes, pdfDoc, pdfjsDoc } = await loadPdfDocument(pdfPath);
+  const { bytes, pdfDoc, pdfjsDoc, closePdfJs } = await loadPdfDocument(pdfPath);
   try {
     const rawStr = bytes.toString("latin1");
     const hasEmbeddedJavaScript =
@@ -266,7 +272,7 @@ async function inspectPdfNode(pdfPath: string) {
       pages,
     };
   } finally {
-    await pdfjsDoc.cleanup();
+    await closePdfJs();
   }
 }
 
@@ -274,7 +280,7 @@ async function analyzePdfNode(
   pdfPath: string,
   options: Record<string, unknown> = {}
 ) {
-  const { pdfDoc, pdfjsDoc } = await loadPdfDocument(pdfPath);
+  const { pdfDoc, pdfjsDoc, closePdfJs } = await loadPdfDocument(pdfPath);
   const enableOcr = options.enableOcr !== false;
   const forceOcr = Boolean(options.forceOcr);
   const ocrLang = typeof options.ocrLanguage === "string" && options.ocrLanguage.trim()
@@ -338,7 +344,7 @@ async function analyzePdfNode(
       // Collect existing widgets on this page mapped via exact cropBox + rotation
       const existingOnPage: Array<{
         name: string;
-        type: FormForgeFieldType;
+        type: FormifyFieldType;
         rect: PdfRect;
         defaultValue?: string;
         maxLength?: number;
@@ -362,7 +368,7 @@ async function analyzePdfNode(
           rot
         );
 
-        let ftype: FormForgeFieldType = "text";
+        let ftype: FormifyFieldType = "text";
         let maxLen: number | undefined;
         let opts: string[] = [];
         if (fld instanceof PDFCheckBox) ftype = "checkbox";
@@ -544,8 +550,8 @@ async function analyzePdfNode(
       detectionSummary,
       generatedAt: new Date().toISOString(),
       engineVersion: usedCvOrOcr
-        ? "formforge-node-cv-ocr-3.0.0"
-        : "formforge-node-fusion-3.0.0",
+        ? "formifypdf-node-cv-ocr-3.0.0"
+        : "formifypdf-node-fusion-3.0.0",
       hasExistingAcroForm: inspection.hasExistingAcroForm,
       isScanned: inspection.isScanned,
       securityFlags: inspection.securityFlags,
@@ -560,7 +566,7 @@ async function analyzePdfNode(
     if (ocrSession) {
       await ocrSession.terminate();
     }
-    await pdfjsDoc.cleanup();
+    await closePdfJs();
   }
 }
 
@@ -785,6 +791,16 @@ async function generateAcroFormNode(payload: {
       tf.addToPage(page, { x: x0, y: y0, width: w, height: h });
       createdWidgets++;
     }
+  }
+
+  if (!form.acroForm.dict.has(PDFName.of("Fields"))) {
+    form.acroForm.dict.set(PDFName.of("Fields"), pdfDoc.context.obj([]));
+  }
+  try {
+    const helv = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    form.updateFieldAppearances(helv);
+  } catch {
+    // Non-fatal fallback if any custom widget lacks default appearance formatting
   }
 
   fs.mkdirSync(path.dirname(payload.outputPdfPath), { recursive: true });
@@ -1287,13 +1303,23 @@ async function validateAcroFormNode(
     );
   }
 
+  const nonSigFields = fields.filter(
+    (f) => f.acroField.dict.lookupMaybe(PDFName.of("FT"), PDFName)?.asString() !== "/Sig"
+  );
+  const appearanceStreamsVerified =
+    nonSigFields.length === 0
+      ? true
+      : nonSigFields.every((f) =>
+          f.acroField.getWidgets().every((w) => w.dict.has(PDFName.of("AP")))
+        );
+
   return {
     validPdf: true,
     hasAcroFormDict: hasAcroForm || widgetCount > 0,
     widgetCount,
     expectedFieldCount: expectedFieldCount || fields.length,
     missingFields,
-    appearanceStreamsVerified: true,
+    appearanceStreamsVerified,
     roundTripWriteReadOk: roundTripOk,
     pageCount: pdfDoc.getPageCount(),
     warnings,
@@ -1301,7 +1327,7 @@ async function validateAcroFormNode(
   };
 }
 
-export async function runFormForgeNodeEngine<T = unknown>(
+export async function runFormifyNodeEngine<T = unknown>(
   command: string,
   payload: Record<string, unknown>
 ): Promise<T> {
@@ -1338,6 +1364,6 @@ export async function runFormForgeNodeEngine<T = unknown>(
         payload.expectedFields as DetectedFormField[] | undefined
       )) as T;
     default:
-      throw new Error(`Unsupported FormForge command: ${command}`);
+      throw new Error(`Unsupported FormifyPDF command: ${command}`);
   }
 }

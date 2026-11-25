@@ -16,7 +16,7 @@ import {
   assertValidTenantId,
   isRegularNonSymlinkFile,
   validatePdfBufferSignature,
-} from "../../server/formforge-storage.ts";
+} from "../../server/formifypdf-storage.ts";
 function isValidDocumentId(id: unknown): id is string { return typeof id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(id); }
 
 export interface StorageScopeOptions {
@@ -328,7 +328,7 @@ export class S3StorageProvider implements StorageProvider {
       throw new Error("S3_BUCKET is required when STORAGE_PROVIDER=s3");
     }
     this.bucket = options.bucket.trim();
-    this.prefix = (options.prefix || "formforge").replace(/^\/+|\/+$/g, "");
+    this.prefix = (options.prefix || "formifypdf").replace(/^\/+|\/+$/g, "");
 
     const clientConfig: ConstructorParameters<typeof S3Client>[0] = {
       region: options.region || process.env.S3_REGION || "us-east-1",
