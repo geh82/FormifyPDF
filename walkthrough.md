@@ -7,7 +7,7 @@
 | Area | File | Line | What Was Happening | Impact | Status | How It Was Fixed |
 |---|---|---|---|---|---|---|
 | Storage Confinement & Missing Provider | `src/lib/storage/storage.ts` | 83 | The storage provider module imported at server startup was missing, leaving legacy PDF generation and signed uploads without confined file storage or S3 safeguards. | High | Fixed | Implemented `LocalStorageProvider` and `S3StorageProvider` reusing shared security helpers (`assertConfinedPath`, `assertValidTenantId`, `isRegularNonSymlinkFile`, `validatePdfBufferSignature`), atomic file writes, private permissions (`0600`/`0700`), and private-by-default S3 objects. |
-| Missing Tenant Filter in Background Worker | `src/server/job-queue.ts` | 390 | `generateAcroFormAssetForDocument` queried `documents` by `id` alone without filtering by `tenant_id`. | Medium | Fixed | Added `AND tenant_id = ?` to the document lookup query and handled the bundled ALV source PDF safely without weakening storage bucket validation. |
+| Missing Tenant Filter in Background Worker | `src/server/job-queue.ts` | 390 | `generateAcroFormAssetForDocument` queried `documents` by `id` alone without filtering by `tenant_id`. | Medium | Fixed | Added `AND tenant_id = ?` to the document lookup query while preserving strict storage bucket validation. |
 | Tenant Filtering & Metadata Cleanup Gaps | `src/server/v1Routes.ts` | 206 | Several update/delete statements omitted `AND tenant_id = ?`, retention sweeps only cleaned `tenant_default`, and deleting records could leave orphaned child files or `storage_metadata` rows. | Medium | Fixed | Added `AND tenant_id = ?` across update/delete queries, added `purgeAllTenantsExpiredDocuments`, and cleaned up child storage objects and `storage_metadata` records atomically on delete and purge. |
 | Supporting File Replacement Safeguards | `src/server/v1Routes.ts` | 2874 | There was no dedicated replacement endpoint for supporting attachments with transactional swap and old-file cleanup. | Low | Fixed | Added `PUT /api/v1/supporting-documents/:id` with RBAC checks (`documents:write`), tenant ownership checks before storing bytes, size caps (`413`), magic-byte/MIME validation (`400`), and old-file cleanup after DB commit. |
 
@@ -18,7 +18,7 @@
 | Database Queries | `src/server/v1Routes.ts` | All SQLite queries use parameterized placeholders (`?`) and explicit `BEGIN` / `COMMIT` / `ROLLBACK` transactions for multi-step writes. |
 | File Upload Validation | `src/server/formforge-storage.ts` | Verifies `%PDF-` / `%%EOF` trailers on PDFs and checks PNG, JPEG, WebP, and PDF magic bytes + declared MIME types + extensions before writing files, with `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment` on downloads. |
 | Path Traversal Prevention | `src/server/formforge-storage.ts` | Rejects null bytes, absolute paths, `..` segments, and unapproved buckets, and verifies resolved paths stay strictly inside the storage root. |
-| Error Handling & PII Redaction | `src/server/alv-node-engine.ts` | Overflow and validation errors report character count limits without echoing sensitive field values back in error responses or logs. |
+| Error Handling & PII Redaction | `src/server/formforge-node-engine.ts` | Overflow and validation errors report character count limits without echoing sensitive field values back in error responses or logs. |
 | Dependencies | `package.json` | Audited 362 packages with `bun audit` — 0 known vulnerabilities found. |
 
 ## PoC Verification

@@ -76,7 +76,7 @@ function evaluateDetectionBenchmark(
   };
 }
 
-function loadAlvGroundTruth(pageFilter?: number): BenchmarkTarget[] {
+function loadBenchmarkGroundTruth(pageFilter?: number): BenchmarkTarget[] {
   const raw = JSON.parse(
     fs.readFileSync(path.resolve(process.cwd(), "tests/benchmark/fixtures/bench_field_map.json"), "utf-8")
   ) as { fields: Record<string, any> };
@@ -142,16 +142,16 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
   });
 
   it("Scenario 1: Digital multi-page government form achieves >=95% recall, >=0.85 mean IoU, and preserves comb char grids", async () => {
-    const alvPdf = path.resolve(process.cwd(), "tests/benchmark/fixtures/bench_form.pdf");
+    const benchPdf = path.resolve(process.cwd(), "tests/benchmark/fixtures/bench_form.pdf");
     const out = await runFormForgeNodeEngine<{
       manifest: FieldManifest;
       ocrJobs: any[];
     }>("analyze", {
-      pdfPath: alvPdf,
-      options: { documentId: "bench_alv_digital" },
+      pdfPath: benchPdf,
+      options: { documentId: "bench_digital" },
     });
 
-    const gt = loadAlvGroundTruth();
+    const gt = loadBenchmarkGroundTruth();
     const metrics = evaluateDetectionBenchmark(out.manifest.fields, gt);
 
     expect(metrics.recall).toBeGreaterThanOrEqual(0.95);
@@ -173,14 +173,14 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
   });
 
   it("Scenario 2: Scanned image-only PDF triggers offline CV + Tesseract OCR and achieves >=90% recall", async () => {
-    const alvPdf = path.resolve(process.cwd(), "tests/benchmark/fixtures/bench_form.pdf");
-    const { png } = await renderPdfPagePngBuffer(alvPdf, 0, 160);
+    const benchPdf = path.resolve(process.cwd(), "tests/benchmark/fixtures/bench_form.pdf");
+    const { png } = await renderPdfPagePngBuffer(benchPdf, 0, 160);
 
     const scanDoc = await PDFDocument.create();
     const pngImg = await scanDoc.embedPng(png);
     const page = scanDoc.addPage([595.28, 841.89]);
     page.drawImage(pngImg, { x: 0, y: 0, width: 595.28, height: 841.89 });
-    const scanPdf = path.join(tmpDir, "alv_p1_scanned.pdf");
+    const scanPdf = path.join(tmpDir, "bench_p1_scanned.pdf");
     fs.writeFileSync(scanPdf, Buffer.from(await scanDoc.save()));
 
     const out = await runFormForgeNodeEngine<{
@@ -188,7 +188,7 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
       ocrJobs: Array<{ wordCount: number; ocrEngine: string; status: string }>;
     }>("analyze", {
       pdfPath: scanPdf,
-      options: { documentId: "bench_alv_scanned", dpi: 160 },
+      options: { documentId: "bench_scanned", dpi: 160 },
     });
 
     expect(out.manifest.isScanned).toBe(true);
@@ -197,7 +197,7 @@ describe("FormForge Universal Detection & AcroForm Benchmark Suite", () => {
     expect(out.ocrJobs.length).toBe(1);
     expect(out.ocrJobs[0].wordCount).toBeGreaterThan(80);
 
-    const gtPage1 = loadAlvGroundTruth(0);
+    const gtPage1 = loadBenchmarkGroundTruth(0);
     const metrics = evaluateDetectionBenchmark(out.manifest.fields, gtPage1);
     expect(metrics.recall).toBeGreaterThanOrEqual(0.9);
     expect(metrics.meanIoU).toBeGreaterThanOrEqual(0.8);

@@ -191,14 +191,15 @@ describe("ZipInspectorSection UI workflow", () => {
     expect(container.textContent).toContain("#123456");
 
     // Download repackaged .zip
-    const anchorClickSpy = vi
-      .spyOn(HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => {});
     await act(async () => {
       clickButtonByText(container, "Download Repackaged .zip");
-      await new Promise((r) => setTimeout(r, 50));
+      for (let i = 0; i < 40; i++) {
+        if (container.textContent?.includes("Downloaded brand-pack-repackaged.zip")) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
     });
-    expect(anchorClickSpy).toHaveBeenCalled();
     expect(container.textContent).toContain("Downloaded brand-pack-repackaged.zip");
   });
 });

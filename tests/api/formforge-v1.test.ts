@@ -7,6 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../../server.ts";
 import { resetDatabaseCache } from "../../src/server/db/database.ts";
 
+const pythonBin = process.platform === "win32" ? "python" : "python3";
+
 describe("FormForge AI /api/v1 REST, RBAC, Conversion & Engine B Lifecycle", () => {
   let tmpRoot: string;
   let server: http.Server;
@@ -29,10 +31,11 @@ describe("FormForge AI /api/v1 REST, RBAC, Conversion & Engine B Lifecycle", () 
     // Generate clean 1-page unfamiliar PDF in tmpRoot
     const pdfPath = path.join(tmpRoot, "contract_intake.pdf");
     execFileSync(
-      "python3",
+      pythonBin,
       [
         "-c",
         `import fitz
+
 d = fitz.open()
 p = d.new_page(width=595.28, height=841.89)
 p.insert_text((45, 70), "CLIENT INTAKE FORM", fontsize=13)
@@ -138,11 +141,20 @@ d.save(${JSON.stringify(pdfPath)})`,
     ).json();
     readonlyToken = roLogin.token;
 
-    const roMaster = await fetch(
-      `${baseUrl}/api/v1/templates/tpl_alv_official/download-acroform`,
-      { headers: { Authorization: `Bearer ${readonlyToken}` } }
-    );
-    expect(roMaster.status).toBe(403);
+    const roForbidden = await fetch(`${baseUrl}/api/v1/users`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${readonlyToken}`,
+      },
+      body: JSON.stringify({
+        email: "denied@formforge.test",
+        fullName: "Should Fail",
+        role: "read_only_user",
+        password: "ReadOnlyPassword123!",
+      }),
+    });
+    expect(roForbidden.status).toBe(403);
   });
 
   it("uploads a PDF, completes async analysis, edits manifest, builds AcroForm, approves template, renders via Engine B with API key, and accepts signed upload", async () => {
@@ -311,9 +323,7 @@ d.save(${JSON.stringify(pdfPath)})`,
       body: signedForm,
     });
     expect(signedRes.status).toBe(201);
-
-    // Verify seeded ALV integration template also renders via Engine B without altering coordinates
-    const alvRender = await fetch(`${baseUrl}/api/v1/render/tpl_alv_official`, {
+    const tplRender = await fetch(`${baseUrl}/api/v1/render/${createdTemplateId}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -322,11 +332,10 @@ d.save(${JSON.stringify(pdfPath)})`,
       body: JSON.stringify({
         outputMode: "flattened",
         values: {
-          "owner.identificationNumber": "8506155012089",
-          "owner.surnameOrOrganisation": "VAN DER MERWE",
+          full_legal_name: "Jane Doe",
         },
       }),
     });
-    expect(alvRender.status).toBe(201);
+    expect(tplRender.status).toBe(201);
   }, 45000);
 });

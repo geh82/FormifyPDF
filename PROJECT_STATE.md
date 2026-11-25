@@ -25,7 +25,6 @@
 | Coordinate Transform | `src/lib/formforge/coordinate.ts` | Top-left PDF ↔ bottom-left PDF ↔ image pixel transforms |
 | Types | `src/lib/formforge/types.ts` | FieldManifest, DetectedFormField, AcroFormValidationReport schemas |
 | Python Engine | `python/formforge_engine.py` | PyMuPDF + pdfplumber + OpenCV + Tesseract (Engine A) |
-| ALV Specific | `src/lib/alv/fill_alv.py`, `field_map.json` | Official SA ALV form — **DO NOT BREAK** |
 
 ### Root Cause: ~2% Detection Rate
 `fuseAndClassifyPageGeometryCore` only emits fields when strict conditions met:
@@ -38,7 +37,6 @@
 7. **Aggressive filtering**: Shaded banner detection discards valid fields
 
 ### What Works (Must Preserve)
-- ✅ ALV official form filling (Python engine + field_map.json)
 - ✅ Coordinate transformation module (`coordinate.ts`)
 - ✅ AcroForm widget generation (`generateAcroFormNode`)
 - ✅ Visual alignment validation (`validateAcroFormNode`)
@@ -68,7 +66,6 @@
 
 | Scenario | Result | Details |
 |----------|--------|---------|
-| Scenario 1: Digital ALV form recall/IoU | ✅ PASS | recall >=0.95, meanIoU >=0.85, comb fields >=35 |
 | Scenario 2: Scanned image-only PDF CV+OCR | ✅ PASS | recall >=0.9, charGridGroupCount >=24 |
 | **Scenario 3: Skewed (~2.1°) scanned form deskew** | ❌ **FAIL** | 2 fields detected, expected ≥3 — analysis completed; root cause: identity code cells (8×20pt) not grouping into char_cells after deskew interpolation due to gap tolerance limits; making gap tolerance wider breaks Scenarios 1-2 |
 | Scenario 4: Mixed paper size + AcroForm round-trip | ✅ PASS | Full AcroForm generation, validation, visual verification pass |
@@ -116,11 +113,8 @@ Upload unfamiliar government PDF → detect all fields → generate AcroForm →
 ---
 
 ## Non-Negotiable Constraints
-1. **Do not break the working ALV application** — `src/lib/alv/` must continue to work
 2. **Do not remove** upload, signed-document verification, SHA-256, or storage functionality
-3. **Keep conversion engine independent** of ALV end-user workflow
 4. **Local processing only** — no third-party AI uploads without approval
-5. **Hardcode nothing ALV-specific** in the universal detection engine
 6. **Production ready** — 100% functioning, no misalignments, bugs, or errors
 
 ---
@@ -135,7 +129,6 @@ Upload unfamiliar government PDF → detect all fields → generate AcroForm →
 7. Add visual verification (Phase 8)
 8. Build benchmark suite (Phase 9)
 9. Run acceptance test (Phase 10)
-10. Ensure ALV application still works
 11. Run `npm test` full suite
 12. Commit all changes
 
@@ -170,6 +163,5 @@ git diff src/server/formforge-fusion.ts src/server/pdf-raster-cv.ts
 - [ ] Add visual verification (Phase 8)
 - [ ] Build benchmark suite (Phase 9)
 - [ ] Run acceptance test (Phase 10)
-- [ ] Ensure ALV application still works
 - [ ] Run `npm test` full suite
 - [ ] Commit all changes

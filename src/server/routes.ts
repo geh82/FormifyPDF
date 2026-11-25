@@ -64,11 +64,11 @@ export function createApiRouter(config: ApiRouterConfig = {}): express.Router {
     const storageHealth = await storage.healthCheck();
     const templatePath = path.resolve(
       config.pythonOptions?.templatePath ||
-        path.join(process.cwd(), "src", "lib", "alv", "ALV_blank.pdf")
+        path.join(process.cwd(), "storage", "blank_template.pdf")
     );
     const scriptPath = path.resolve(
       config.pythonOptions?.scriptPath ||
-        path.join(process.cwd(), "src", "lib", "alv", "fill_alv.py")
+        path.join(process.cwd(), "python", "formforge_engine.py")
     );
 
     let templateAvailable = false;

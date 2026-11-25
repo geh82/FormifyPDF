@@ -1189,10 +1189,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       const buf = doc.source_storage_key.startsWith("src/")
         ? null
         : readStorageBuffer(doc.source_storage_key);
-      if (doc.source_storage_key === "src/lib/alv/ALV_blank.pdf") {
-        res.sendFile(path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf"));
-        return;
-      }
+
       if (!buf) {
         res.status(404).json({ ok: false, error: "Source PDF file not found" });
         return;
@@ -1226,10 +1223,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         res.status(404).json({ ok: false, error: "No generated AcroForm asset found yet" });
         return;
       }
-      if (asset.storage_key === "src/lib/alv/ALV_blank.pdf") {
-        res.sendFile(path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf"));
-        return;
-      }
+
       const buf = readStorageBuffer(asset.storage_key);
       if (!buf) {
         res.status(404).json({ ok: false, error: "AcroForm file missing on storage" });
@@ -1628,10 +1622,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         return;
       }
 
-      const tplAbs =
-        asset.storage_key === "src/lib/alv/ALV_blank.pdf"
-          ? path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf")
-          : resolveSafeStoragePath(asset.storage_key);
+      const tplAbs = resolveSafeStoragePath(asset.storage_key);
       const manifest = JSON.parse(latestMan.manifest_json) as FieldManifest;
       const values = (req.body?.values || {}) as Record<string, unknown>;
       const flatten = req.body?.flatten !== false;
@@ -1865,7 +1856,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       if (tpl.is_system_integration) {
         res.status(403).json({
           ok: false,
-          error: "Pre-calibrated ALV integration template cannot be overwritten.",
+          error: "Locked template cannot be overwritten.",
         });
         return;
       }
@@ -2158,7 +2149,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       if (tpl.is_system_integration) {
         res.status(403).json({
           ok: false,
-          error: "Pre-calibrated ALV integration template cannot be deleted.",
+          error: "Locked template cannot be deleted.",
         });
         return;
       }
@@ -2241,12 +2232,6 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         return;
       }
 
-      if (row.storage_key === "src/lib/alv/ALV_blank.pdf") {
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", 'attachment; filename="ALV_blank_master.pdf"');
-        res.sendFile(path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf"));
-        return;
-      }
       const buf = readStorageBuffer(row.storage_key);
       if (!buf) {
         res.status(404).json({ ok: false, error: "Master AcroForm file missing" });
@@ -2356,10 +2341,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
         }
       }
 
-      const tplAbs =
-        row.acroform_key === "src/lib/alv/ALV_blank.pdf"
-          ? path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf")
-          : resolveSafeStoragePath(row.acroform_key);
+      const tplAbs = resolveSafeStoragePath(row.acroform_key);
       const outKey = `renders/${crypto.randomBytes(16).toString("hex")}.pdf`;
       const outAbs = resolveSafeStoragePath(outKey);
 

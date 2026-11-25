@@ -53,7 +53,7 @@ describe("FormForge AI Coordinate Calibration & Studio Frontend", () => {
     expect(backTopLeft.height).toBeCloseTo(orig.height, 1);
   });
 
-  it("opens FormForge AI Studio tab, shows First-Run Admin Claim, and renders Dashboard & ALV Integration Template", async () => {
+  it("opens FormForge AI Studio tab, shows First-Run Admin Claim, and renders Dashboard & Approved Template", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url === "/api/v1/auth/status") {
@@ -126,9 +126,9 @@ describe("FormForge AI Coordinate Calibration & Studio Frontend", () => {
             ok: true,
             documents: [
               {
-                id: "doc_alv_official",
-                title: "Official ALV(9)(2011/07) Form",
-                original_filename: "ALV_blank.pdf",
+                id: "doc_sample_form",
+                title: "Sample Official Form",
+                original_filename: "sample_form.pdf",
                 byte_size: 115000,
                 page_count: 2,
                 is_scanned: 0,
@@ -148,18 +148,18 @@ describe("FormForge AI Coordinate Calibration & Studio Frontend", () => {
             ok: true,
             templates: [
               {
-                id: "tpl_alv_official",
-                document_id: "doc_alv_official",
-                name: "Official ALV(9)(2011/07) — Motor Vehicle Licensing",
-                slug: "alv-official-9-2011-07",
-                description: "Pre-calibrated ALV integration template.",
+                id: "tpl_sample_approved",
+                document_id: "doc_sample_form",
+                name: "Sample Approved Form Template",
+                slug: "sample-approved-form",
+                description: "Pre-calibrated approved form template.",
                 category: "Government & Licensing",
-                tags_json: '["ALV"]',
+                tags_json: '["FORM"]',
                 status: "approved",
                 output_policy: "flattened",
                 current_version_number: 1,
                 is_system_integration: 1,
-                integration_key: "alv_official",
+                integration_key: "sample_official",
                 field_count: 48,
                 updated_at: "2026-11-22T00:00:00Z",
               },
@@ -181,7 +181,7 @@ describe("FormForge AI Coordinate Calibration & Studio Frontend", () => {
 
     // Switch to FormForge AI Studio tab
     const studioTab = Array.from(container.querySelectorAll('button[role="tab"]')).find((b) =>
-      b.textContent?.includes("FormForge AI Studio")
+      b.textContent?.includes("Conversion Studio")
     ) as HTMLButtonElement;
     expect(studioTab).toBeTruthy();
 
@@ -227,6 +227,6 @@ describe("FormForge AI Coordinate Calibration & Studio Frontend", () => {
       tplNav.click();
     });
 
-    expect(container.textContent).toContain("Official ALV(9)(2011/07)");
+    expect(container.textContent).toContain("Sample Approved Form Template");
   });
 });

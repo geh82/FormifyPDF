@@ -2,7 +2,7 @@
 """
 FormForge AI — Universal PDF Intelligence, OCR, Computer Vision, AcroForm Generation & Rendering Engine.
 
-Self-hosted, zero-ALV-assumption engine using PyMuPDF (fitz), pdfplumber, pypdf, OpenCV,
+Self-hosted, zero-form-specific-assumption engine using PyMuPDF (fitz), pdfplumber, pypdf, OpenCV,
 Pillow, and Tesseract OCR.
 
 Commands:

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Inspects the official blank South African ALV PDF (src/lib/alv/ALV_blank.pdf),
+Inspects a blank PDF form and generates field coordinate maps and reports:
 extracts AcroForm widgets (if present) and vector-drawn character-cell boxes &
 selection boxes from Corel/print vector geometry, verifies nearby bilingual
 (English/Afrikaans) labels, and generates:
-  - src/lib/alv/field_map.json
-  - src/lib/alv/field_map_report.json
+  - tests/benchmark/fixtures/bench_field_map.json
+  - storage/field_map_report.json
 
 Usage:
-  python3 scripts/build_field_map.py [--pdf src/lib/alv/ALV_blank.pdf] [--out src/lib/alv/field_map.json]
+  python3 scripts/build_field_map.py [--pdf path/to/form.pdf] [--out path/to/field_map.json]
 """
 
 from __future__ import annotations
@@ -127,11 +127,11 @@ def find_selection_boxes_on_page(
 
 def build_mapping(pdf_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     if not pdf_path.exists():
-        raise FileNotFoundError(f"Official ALV PDF not found: {pdf_path}")
+        raise FileNotFoundError(f"Input PDF not found: {pdf_path}")
 
     doc = fitz.open(str(pdf_path))
     if len(doc) != 2:
-        raise ValueError(f"Expected 2-page official ALV PDF, found {len(doc)} pages")
+        if len(doc) < 1:\n        raise ValueError("Input PDF contains no pages")
 
     p1 = doc[0]
     p2 = doc[1]
@@ -360,8 +360,8 @@ def build_mapping(pdf_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
     field_map = {
         "schemaVersion": "1.0.0",
-        "sourcePdf": "ALV_blank.pdf",
-        "formRevision": "ALV(9)(2011/07)",
+        "sourcePdf": os.path.basename(pdf_path),
+        "formRevision": "v1",
         "renderingMode": "acroform_if_present_else_vector_cells",
         "acroformWidgetCount": len(acroform_widgets),
         "pageSizes": [
@@ -373,7 +373,7 @@ def build_mapping(pdf_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
     report = {
         "sourcePdf": str(pdf_path),
-        "formRevision": "ALV(9)(2011/07)",
+        "formRevision": "v1",
         "isAcroFormPdf": bool(doc.is_form_pdf),
         "acroformWidgetsFound": len(acroform_widgets),
         "totalMappedFields": len(fields),
@@ -399,10 +399,10 @@ def build_mapping(pdf_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Inspect official ALV PDF and generate field_map.json")
-    parser.add_argument("--pdf", default="src/lib/alv/ALV_blank.pdf", help="Path to official blank ALV PDF")
-    parser.add_argument("--out", default="src/lib/alv/field_map.json", help="Output path for field_map.json")
-    parser.add_argument("--report", default="src/lib/alv/field_map_report.json", help="Output path for inspection report")
+    parser = argparse.ArgumentParser(description="Inspect PDF form and generate field_map.json")
+    parser.add_argument("--pdf", default="tests/benchmark/fixtures/bench_form.pdf", help="Path to blank PDF form")
+    parser.add_argument("--out", default="tests/benchmark/fixtures/bench_field_map.json", help="Output path for field_map.json")
+    parser.add_argument("--report", default="storage/field_map_report.json", help="Output path for inspection report")
     args = parser.parse_args()
 
     try:

@@ -398,10 +398,7 @@ export async function generateAcroFormAssetForDocument(params: {
     throw new Error("Document not found");
   }
 
-  const sourcePath =
-    docRow.source_storage_key === "src/lib/alv/ALV_blank.pdf"
-      ? path.resolve(process.cwd(), "src/lib/alv/ALV_blank.pdf")
-      : resolveSafeStoragePath(docRow.source_storage_key);
+  const sourcePath = resolveSafeStoragePath(docRow.source_storage_key);
   const outKey = `acroforms/${crypto.randomBytes(16).toString("hex")}.pdf`;
   const outAbsPath = resolveSafeStoragePath(outKey);
 

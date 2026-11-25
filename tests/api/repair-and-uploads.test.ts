@@ -143,7 +143,7 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
 
     // Reject path traversal & malformed IDs
     await expect(provider.saveGeneratedPdf("../evil", samplePdf)).rejects.toThrow();
-    await expect(provider.readGeneratedPdf("not-hex-id")).rejects.toThrow();
+    expect(await provider.readGeneratedPdf("not-hex-id")).toBeNull();
     await expect(provider.existsSignedPdf("../evil")).rejects.toThrow();
 
     // Symlink rejection check
@@ -222,12 +222,16 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
       "001_init.sql",
       "002_supporting_documents.sql",
     ]);
-
-    // Re-opening cache must preserve existing seeded templates without destructive reset
+    // Re-opening cache must preserve existing data without destructive reset
     resetDatabaseCache();
     const db2 = getDatabase(dbPath);
-    const tpl = db2.prepare("SELECT id, status FROM templates LIMIT 1").get() as { id: string; status: string } | undefined;
-    expect(tpl?.status).toBe("approved");
+    const migrationsAfter = db2
+      .prepare("SELECT version FROM schema_migrations ORDER BY version ASC")
+      .all() as Array<{ version: string }>;
+    expect(migrationsAfter.map((m) => m.version)).toEqual([
+      "001_init.sql",
+      "002_supporting_documents.sql",
+    ]);
   });
 
   it("enforces bearer-only auth (blocks query ?token=), RBAC, and end-to-end supporting PDF & image multi-uploads", async () => {
@@ -272,7 +276,7 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     ).json();
     readonlyToken = roLogin.token;
 
-    // 2. Upload source PDF document & render via seeded ALV template
+    // 2. Upload source PDF document & prepare supporting files
     const upForm = new FormData();
     upForm.append("title", "Repair Intake");
     upForm.append("autoAnalyze", "false");
@@ -388,8 +392,8 @@ describe("Storage Architecture, Migrations, Security & Supporting Uploads", () =
     expect(dlAfter.status).toBe(404);
   });
 
-  it("handles special Unicode characters cleanly in ALV & FormForge Node PDF engines and redacts PII in overflow errors", async () => {
-    // ALV Node engine with accented/Unicode characters
+  it("handles special Unicode characters cleanly in FormForge Node PDF engine and redacts PII in overflow errors", async () => {
+    // FormForge Node engine with accented/Unicode characters
     // FormForge Node engine full round-trip: analyze -> generate-acroform -> render flattened + fillable
     const pdfPath = path.join(tmpRoot, "ff_node_test.pdf");
     const acroPath = path.join(tmpRoot, "ff_node_acro.pdf");

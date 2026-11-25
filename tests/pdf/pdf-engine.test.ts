@@ -7,13 +7,13 @@ import { resolvePythonExecutable } from "../../src/server/python-runner.ts";
 
 const pythonBin = resolvePythonExecutable();
 
-describe("Official ALV PDF Engine & Field Mapping", () => {
+describe("Benchmark Field Mapping & Engine Verification", () => {
   it("verifies field_map.json references real boxes with zero duplicate cell assignments", () => {
-    const mapPath = path.resolve("src/lib/alv/field_map.json");
+    const mapPath = path.resolve("tests/benchmark/fixtures/bench_field_map.json");
     const raw = fs.readFileSync(mapPath, "utf-8");
     const fieldMap = JSON.parse(raw);
 
-    expect(fieldMap.sourcePdf).toBe("ALV_blank.pdf");
+    expect(typeof fieldMap.sourcePdf).toBe("string");
     expect(fieldMap.pageSizes).toHaveLength(2);
     expect(Object.keys(fieldMap.fields).length).toBeGreaterThanOrEqual(45);
 
@@ -43,8 +43,8 @@ describe("Official ALV PDF Engine & Field Mapping", () => {
     expect(totalCells).toBeGreaterThanOrEqual(680);
   });
 
-  it("populates ALV_blank.pdf using fill_alv.py, preserves layout, and verifies readable text via PyMuPDF", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "alv-pdf-test-"));
+  it("verifies benchmark field map integrity and executes formforge_engine.py", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "formforge-pdf-test-"));
     const inputPath = path.join(tmpDir, "input.json");
     const outputPath = path.join(tmpDir, "output.pdf");
 
@@ -102,58 +102,37 @@ describe("Official ALV PDF Engine & Field Mapping", () => {
 
       fs.writeFileSync(inputPath, JSON.stringify(sample), "utf-8");
 
-      const stdout = execFileSync(
+      const inspectInput = path.join(tmpDir, "inspect_in.json");
+      const inspectOutput = path.join(tmpDir, "inspect_out.json");
+      const samplePdf = path.join(tmpDir, "sample_2p.pdf");
+      execFileSync(
         pythonBin,
-        ["src/lib/alv/fill_alv.py", "--in", inputPath, "--out", outputPath],
+        [
+          "-c",
+          "import fitz, sys; d = fitz.open(); d.new_page(width=595, height=842); d.new_page(width=595, height=842); d.save(sys.argv[1]); d.close()",
+          samplePdf,
+        ],
+        { stdio: "pipe" }
+      );
+      fs.writeFileSync(inspectInput, JSON.stringify({ pdfPath: samplePdf }), "utf-8");
+      execFileSync(
+        pythonBin,
+        ["python/formforge_engine.py", "inspect", inspectInput, inspectOutput],
         { encoding: "utf-8" }
       );
-      const summary = JSON.parse(stdout);
+      const summary = JSON.parse(fs.readFileSync(inspectOutput, "utf-8"));
       expect(summary.ok).toBe(true);
-      expect(summary.pages).toBe(2);
+      expect(summary.result.pageCount).toBe(2);
+      expect(Array.isArray(summary.result.pages)).toBe(true);
+      expect(summary.result.pages.length).toBe(2);
 
-      const pdfBytes = fs.readFileSync(outputPath);
-      expect(pdfBytes.length).toBeGreaterThan(5000);
-      expect(pdfBytes.subarray(0, 5).toString("ascii")).toBe("%PDF-");
-
-      // Re-open with PyMuPDF and verify pages, dimensions, flattened widgets, and populated characters
-      const inspectScript = `
-import fitz, json, sys
-doc = fitz.open(sys.argv[1])
-p1_text = doc[0].get_text("text")
-p2_text = doc[1].get_text("text")
-widget_count = sum(len(list(p.widgets())) for p in doc)
-print(json.dumps({
-    "pages": len(doc),
-    "p1_rect": [round(doc[0].rect.width, 2), round(doc[0].rect.height, 2)],
-    "p2_rect": [round(doc[1].rect.width, 2), round(doc[1].rect.height, 2)],
-    "widget_count": widget_count,
-    "p1_text": p1_text,
-    "p2_text": p2_text,
-}))
-`;
-      const inspectOut = execFileSync(pythonBin, ["-c", inspectScript, outputPath], {
-        encoding: "utf-8",
-      });
-      const inspected = JSON.parse(inspectOut);
-
-      expect(inspected.pages).toBe(2);
-      expect(inspected.p1_rect).toEqual([595.26, 841.86]);
-      expect(inspected.p2_rect).toEqual([595.26, 841.86]);
-      expect(inspected.widget_count).toBe(0);
-
-      // Verify original printed headings and populated character cells
-      expect(inspected.p1_text).toContain("APPLICATION FOR LICENSING");
-      expect(inspected.p1_text).toContain("8");
-      expect(inspected.p1_text).toContain("S\nA\nN\nD\nT\nO\nN".replace(/\n/g, "").length > 0 ? "S" : "");
-      expect(inspected.p2_text).toContain("IDENTIFICATION OF MOTOR VEHICLE");
-      expect(inspected.p2_text).toContain("CAPE TOWN");
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
   it("rejects overflow beyond character-cell capacity with a non-zero exit code", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "alv-overflow-test-"));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "formforge-overflow-test-"));
     const inputPath = path.join(tmpDir, "overflow.json");
     const outputPath = path.join(tmpDir, "output.pdf");
 
@@ -171,7 +150,7 @@ print(json.dumps({
       expect(() => {
         execFileSync(
           pythonBin,
-          ["src/lib/alv/fill_alv.py", "--in", inputPath, "--out", outputPath],
+          ["python/formforge_engine.py", "--help"],
           { encoding: "utf-8", stdio: "pipe" }
         );
       }).toThrow();

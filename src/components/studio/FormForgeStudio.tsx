@@ -56,9 +56,7 @@ export type StudioNavSection =
   | "settings"
   | "users";
 
-interface FormForgeStudioProps {
-  onOpenAlvPortal?: () => void;
-}
+
 
 function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return "0 B";
@@ -67,7 +65,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
+export function FormForgeStudio() {
   const apiRef = useRef<StudioApiClient>(new StudioApiClient());
   const api = apiRef.current;
 
@@ -125,7 +123,7 @@ export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
   } | null>(null);
 
   // Engine B state
-  const [genTemplateId, setGenTemplateId] = useState<string>("tpl_alv_official");
+  const [genTemplateId, setGenTemplateId] = useState<string>("");
   const [genManifest, setGenManifest] = useState<FieldManifest | null>(null);
   const [genValues, setGenValues] = useState<Record<string, unknown>>({});
   const [genOutputMode, setGenOutputMode] = useState<"flattened" | "fillable">("flattened");
@@ -731,15 +729,6 @@ export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
         </div>
 
         <div className="flex items-center gap-3">
-          {onOpenAlvPortal && (
-            <button
-              type="button"
-              onClick={onOpenAlvPortal}
-              className="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-800 hover:bg-slate-100 whitespace-nowrap"
-            >
-              Open Customer ALV Portal
-            </button>
-          )}
           <button
             type="button"
             onClick={async () => {
@@ -1425,14 +1414,6 @@ export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
                         <span>{t.field_count ?? 0} fields</span>
                         <span>·</span>
                         <span>Policy: {t.output_policy}</span>
-                        {t.is_system_integration === 1 && (
-                          <>
-                            <span>·</span>
-                            <span className="font-medium text-emerald-800">
-                              Official ALV Integration
-                            </span>
-                          </>
-                        )}
                       </div>
                     </div>
                   ))}
@@ -1658,15 +1639,6 @@ export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
                     Dynamically render approved templates into flattened customer-safe PDFs (or authorised fillable PDFs) and capture signed returns.
                   </p>
                 </div>
-                {onOpenAlvPortal && (
-                  <button
-                    type="button"
-                    onClick={onOpenAlvPortal}
-                    className="rounded-md border border-emerald-800 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-900 hover:bg-emerald-100"
-                  >
-                    Switch to Dedicated ALV Wizard
-                  </button>
-                )}
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
@@ -1977,27 +1949,6 @@ export function FormForgeStudio({ onOpenAlvPortal }: FormForgeStudioProps) {
                 <p className="text-xs text-slate-500">
                   Authenticate external portals and backend integrations against /api/v1/* endpoints.
                 </p>
-              </div>
-
-              {/* Flagship ALV Integration Card */}
-              <div className="rounded-lg border border-emerald-200 bg-emerald-50/40 p-4 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs font-semibold text-emerald-950">
-                    Active First-Party Integration: ALV Form Online (ALV(9)(2011/07))
-                  </p>
-                  <p className="text-xs text-emerald-900/80 mt-0.5">
-                    Seeded as approved template <span className="font-mono">tpl_alv_official</span>. Both Engine B (<span className="font-mono">POST /api/v1/render/tpl_alv_official</span>) and the legacy portal (<span className="font-mono">POST /api/generate-pdf</span>) preserve all character-cell coordinates.
-                  </p>
-                </div>
-                {onOpenAlvPortal && (
-                  <button
-                    type="button"
-                    onClick={onOpenAlvPortal}
-                    className="rounded-md bg-emerald-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-800 whitespace-nowrap"
-                  >
-                    Launch ALV Portal
-                  </button>
-                )}
               </div>
 
               {hasPermission("api_keys:manage") && (

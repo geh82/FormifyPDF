@@ -21,7 +21,7 @@ export interface AppConfig extends ApiRouterConfig {
 }
 
 export async function createApp(apiConfig: AppConfig = {}) {
-  // Initialize SQLite relational schema & baseline RBAC / ALV integration seed
+  // Initialize SQLite relational schema & baseline RBAC
   getDatabase();
 
   const app = express();
@@ -58,7 +58,7 @@ export async function createApp(apiConfig: AppConfig = {}) {
     })
   );
 
-  // Mount ALV Form Online API routes
+  // Mount API routes
   app.use("/api", createApiRouter(apiConfig));
 
   const isProd = process.env.NODE_ENV === "production";
@@ -121,7 +121,7 @@ if (isEntryPoint) {
   retentionTimer.unref();
 
   const httpServer = app.listen(port, "0.0.0.0", () => {
-    console.log(`FormForge AI & ALV Form Online listening on http://0.0.0.0:${port}`);
+    console.log(`FormForge listening on http://0.0.0.0:${port}`);
   });
 
   const shutdown = (signal: string) => {

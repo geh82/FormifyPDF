@@ -328,7 +328,7 @@ export class S3StorageProvider implements StorageProvider {
       throw new Error("S3_BUCKET is required when STORAGE_PROVIDER=s3");
     }
     this.bucket = options.bucket.trim();
-    this.prefix = (options.prefix || "alv").replace(/^\/+|\/+$/g, "");
+    this.prefix = (options.prefix || "formforge").replace(/^\/+|\/+$/g, "");
 
     const clientConfig: ConstructorParameters<typeof S3Client>[0] = {
       region: options.region || process.env.S3_REGION || "us-east-1",

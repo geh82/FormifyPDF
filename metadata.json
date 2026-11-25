@@ -1,6 +1,6 @@
 {
-  "name": "ALV Form Online",
-  "description": "Official South African Application for Licensing of Motor Vehicle (ALV) online completion, PDF generation, and signed document submission platform.",
+  "name": "FormForge",
+  "description": "Standalone PDF form detection, template management, and document rendering platform."
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
