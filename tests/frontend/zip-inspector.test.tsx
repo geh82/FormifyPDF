@@ -69,6 +69,7 @@ describe("ZipInspectorSection UI workflow", () => {
 
   beforeEach(() => {
     (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+    window.history.pushState({}, "", "/admin");
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -81,6 +82,7 @@ describe("ZipInspectorSection UI workflow", () => {
       root.unmount();
     });
     container.remove();
+    window.history.pushState({}, "", "/");
     URL.createObjectURL = origCreateObjectUrl;
     URL.revokeObjectURL = origRevokeObjectUrl;
     vi.restoreAllMocks();

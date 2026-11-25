@@ -208,6 +208,25 @@ function seedBaselineData(db: DatabaseSync) {
     }
   }
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS public_conversions (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      job_id TEXT REFERENCES analysis_jobs(id) ON DELETE SET NULL,
+      access_token_hash TEXT NOT NULL,
+      source_type TEXT NOT NULL DEFAULT 'pdf',
+      zip_archive_id TEXT,
+      archive_filename TEXT,
+      extra_page_count INTEGER NOT NULL DEFAULT 0,
+      paid INTEGER NOT NULL DEFAULT 0,
+      paid_tier_id TEXT,
+      paid_tier_name TEXT,
+      paid_amount_cents INTEGER,
+      paid_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 }
 
 export function getRolePermissions(db: DatabaseSync, roleName: string): string[] {

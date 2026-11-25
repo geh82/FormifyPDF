@@ -39,11 +39,13 @@ import {
   type AuthUser,
   type DocumentRecord,
   type JobRecord,
+  type PricingTierRecord,
   type TemplateRecord,
 } from "./studio-api.ts";
 
 export type StudioNavSection =
   | "dashboard"
+  | "admin_controls"
   | "convert"
   | "analysis"
   | "editor"
@@ -187,6 +189,25 @@ export function FormifyPdfStudio() {
   const [newUserName, setNewUserName] = useState("");
   const [newUserRole, setNewUserRole] = useState<RoleName>("editor");
   const [newUserPassword, setNewUserPassword] = useState("");
+
+  // Admin Feature Toggles & Pricing Tiers state
+  const [adminToggles, setAdminToggles] = useState<{
+    topTierZipUpload: boolean;
+    topTierZipDownload: boolean;
+    normalUpload: boolean;
+    normalDownload: boolean;
+  }>({
+    topTierZipUpload: false,
+    topTierZipDownload: false,
+    normalUpload: true,
+    normalDownload: true,
+  });
+  const [adminPricingTiers, setAdminPricingTiers] = useState<PricingTierRecord[]>([]);
+  const [newTierName, setNewTierName] = useState("");
+  const [newTierMaxPages, setNewTierMaxPages] = useState("50");
+  const [newTierPriceDollars, setNewTierPriceDollars] = useState("7.99");
+  const [newTierDescription, setNewTierDescription] = useState("");
+  const [adminBusy, setAdminBusy] = useState(false);
 
   const [notice, setNotice] = useState<string | null>(null);
   const [studioError, setStudioError] = useState<string | null>(null);
@@ -368,19 +389,33 @@ export function FormifyPdfStudio() {
       })();
     }
 
-    if (activeNav === "settings" && hasPermission("settings:manage")) {
+    if ((activeNav === "settings" || activeNav === "admin_controls") && hasPermission("settings:manage")) {
       void (async () => {
         try {
-          const res = await api.json<{
-            ok: boolean;
-            tenant: { name: string; retention_days: number };
-            storageBytes: number;
-          }>("/api/v1/settings");
+          const [res, adminRes] = await Promise.all([
+            api.json<{
+              ok: boolean;
+              tenant: { name: string; retention_days: number };
+              storageBytes: number;
+            }>("/api/v1/settings"),
+            api.json<{
+              ok: boolean;
+              toggles: {
+                topTierZipUpload: boolean;
+                topTierZipDownload: boolean;
+                normalUpload: boolean;
+                normalDownload: boolean;
+              };
+              pricingTiers: PricingTierRecord[];
+            }>("/api/v1/admin"),
+          ]);
           setSettingsData({
             name: res.tenant.name,
             retentionDays: res.tenant.retention_days,
             storageBytes: res.storageBytes,
           });
+          if (adminRes.toggles) setAdminToggles(adminRes.toggles);
+          if (Array.isArray(adminRes.pricingTiers)) setAdminPricingTiers(adminRes.pricingTiers);
         } catch {
           // ignore
         }
@@ -784,6 +819,7 @@ export function FormifyPdfStudio() {
 
   const navItems: Array<{ id: StudioNavSection; label: string; icon: typeof LayoutDashboard }> = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "admin_controls", label: "Toggles & Pricing", icon: SlidersHorizontal },
     { id: "convert", label: "Convert PDF", icon: Upload },
     { id: "analysis", label: "Document Analysis", icon: FileText },
     { id: "editor", label: "Field Editor", icon: PencilRuler },
@@ -2490,6 +2526,287 @@ export function FormifyPdfStudio() {
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+
+          {/* FEATURE TOGGLES & PRICING TIERS (ADMIN ONLY) */}
+          {activeNav === "admin_controls" && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">
+                  Public Feature Toggles &amp; Page Pricing Tiers
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Control client upload/download availability and configure active page-based pricing tiers displayed on the public portal.
+                </p>
+              </div>
+
+              {!hasPermission("settings:manage") ? (
+                <p className="text-xs text-slate-500">
+                  Administrator permission is required to manage feature toggles and pricing tiers.
+                </p>
+              ) : (
+                <div className="space-y-6">
+                  {/* Feature Toggles */}
+                  <div className="rounded-lg border border-slate-200 p-5 space-y-4">
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      Client Portal Feature Toggles
+                    </h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                      <label className="flex items-center justify-between gap-3 rounded-md border border-slate-200 px-3.5 py-2.5">
+                        <div>
+                          <p className="font-medium text-slate-900">Client PDF Upload</p>
+                          <p className="text-[11px] text-slate-500">Allow single PDF uploads on /</p>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={adminToggles.normalUpload}
+                          onChange={(e) =>
+                            setAdminToggles((prev) => ({ ...prev, normalUpload: e.target.checked }))
+                          }
+                        />
+                      </label>
+
+                      <label className="flex items-center justify-between gap-3 rounded-md border border-slate-200 px-3.5 py-2.5">
+                        <div>
+                          <p className="font-medium text-slate-900">Client PDF Download</p>
+                          <p className="text-[11px] text-slate-500">Allow PDF downloads after payment</p>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={adminToggles.normalDownload}
+                          onChange={(e) =>
+                            setAdminToggles((prev) => ({ ...prev, normalDownload: e.target.checked }))
+                          }
+                        />
+                      </label>
+
+                      <label className="flex items-center justify-between gap-3 rounded-md border border-slate-200 px-3.5 py-2.5">
+                        <div>
+                          <p className="font-medium text-slate-900">ZIP Upload</p>
+                          <p className="text-[11px] text-slate-500">Allow ZIP bundle uploads on /</p>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={adminToggles.topTierZipUpload}
+                          onChange={(e) =>
+                            setAdminToggles((prev) => ({
+                              ...prev,
+                              topTierZipUpload: e.target.checked,
+                            }))
+                          }
+                        />
+                      </label>
+
+                      <label className="flex items-center justify-between gap-3 rounded-md border border-slate-200 px-3.5 py-2.5">
+                        <div>
+                          <p className="font-medium text-slate-900">ZIP Download</p>
+                          <p className="text-[11px] text-slate-500">Allow ZIP downloads after payment</p>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={adminToggles.topTierZipDownload}
+                          onChange={(e) =>
+                            setAdminToggles((prev) => ({
+                              ...prev,
+                              topTierZipDownload: e.target.checked,
+                            }))
+                          }
+                        />
+                      </label>
+                    </div>
+
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        disabled={adminBusy}
+                        onClick={async () => {
+                          setAdminBusy(true);
+                          setStudioError(null);
+                          try {
+                            await api.json("/api/v1/admin/toggles", {
+                              method: "POST",
+                              body: JSON.stringify(adminToggles),
+                            });
+                            setNotice("Feature toggles updated.");
+                          } catch (err) {
+                            setStudioError(
+                              err instanceof Error ? err.message : "Failed to save feature toggles"
+                            );
+                          } finally {
+                            setAdminBusy(false);
+                          }
+                        }}
+                        className="rounded-md bg-emerald-900 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-800 disabled:opacity-50"
+                      >
+                        Save Feature Toggles
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Pricing Tiers Management */}
+                  <div className="rounded-lg border border-slate-200 p-5 space-y-4">
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      Page-Based Pricing Tiers
+                    </h3>
+
+                    <form
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        setStudioError(null);
+                        setAdminBusy(true);
+                        try {
+                          const maxPages = Math.round(Number(newTierMaxPages));
+                          const priceCents = Math.round(Number(newTierPriceDollars) * 100);
+                          await api.json("/api/v1/admin/pricing-tiers", {
+                            method: "POST",
+                            body: JSON.stringify({
+                              name: newTierName.trim(),
+                              maxPages,
+                              priceCents,
+                              description: newTierDescription.trim(),
+                            }),
+                          });
+                          const refreshed = await api.json<{
+                            ok: boolean;
+                            pricingTiers: PricingTierRecord[];
+                          }>("/api/v1/admin");
+                          setAdminPricingTiers(refreshed.pricingTiers || []);
+                          setNewTierName("");
+                          setNewTierDescription("");
+                          setNotice("Pricing tier saved.");
+                        } catch (err) {
+                          setStudioError(
+                            err instanceof Error ? err.message : "Failed to create pricing tier"
+                          );
+                        } finally {
+                          setAdminBusy(false);
+                        }
+                      }}
+                      className="grid grid-cols-1 sm:grid-cols-5 gap-3 items-end text-xs"
+                    >
+                      <div>
+                        <label className="block font-medium text-slate-700 mb-1">Tier Name</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="Up to 50 pages"
+                          value={newTierName}
+                          onChange={(e) => setNewTierName(e.target.value)}
+                          className="w-full rounded border border-slate-300 px-2.5 py-1.5"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-medium text-slate-700 mb-1">Max Pages</label>
+                        <input
+                          type="number"
+                          required
+                          min={1}
+                          value={newTierMaxPages}
+                          onChange={(e) => setNewTierMaxPages(e.target.value)}
+                          className="w-full rounded border border-slate-300 px-2.5 py-1.5 tabular-nums"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-medium text-slate-700 mb-1">Price (USD)</label>
+                        <input
+                          type="number"
+                          required
+                          min={0}
+                          step="0.01"
+                          value={newTierPriceDollars}
+                          onChange={(e) => setNewTierPriceDollars(e.target.value)}
+                          className="w-full rounded border border-slate-300 px-2.5 py-1.5 tabular-nums"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-medium text-slate-700 mb-1">Description</label>
+                        <input
+                          type="text"
+                          placeholder="Optional summary"
+                          value={newTierDescription}
+                          onChange={(e) => setNewTierDescription(e.target.value)}
+                          className="w-full rounded border border-slate-300 px-2.5 py-1.5"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={adminBusy}
+                        className="rounded-md bg-emerald-900 px-3 py-1.5 font-medium text-white hover:bg-emerald-800 disabled:opacity-50"
+                      >
+                        Add Pricing Tier
+                      </button>
+                    </form>
+
+                    <div className="rounded-lg border border-slate-200 overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                          <tr>
+                            <th className="px-3 py-2 font-medium">Name</th>
+                            <th className="px-3 py-2 font-medium">Max Pages</th>
+                            <th className="px-3 py-2 font-medium">Price</th>
+                            <th className="px-3 py-2 font-medium">Status</th>
+                            <th className="px-3 py-2 font-medium">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 tabular-nums">
+                          {adminPricingTiers.map((tier) => (
+                            <tr key={tier.id}>
+                              <td className="px-3 py-2 font-medium text-slate-900">{tier.name}</td>
+                              <td className="px-3 py-2">{tier.max_pages} pages</td>
+                              <td className="px-3 py-2 font-mono">
+                                ${(tier.price_cents / 100).toFixed(2)}
+                              </td>
+                              <td className="px-3 py-2">
+                                {Number(tier.is_active) === 1 ? "Active" : "Inactive"}
+                              </td>
+                              <td className="px-3 py-2">
+                                <div className="flex items-center gap-3">
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      await api.json(`/api/v1/admin/pricing-tiers/${tier.id}`, {
+                                        method: "PATCH",
+                                        body: JSON.stringify({
+                                          isActive: Number(tier.is_active) !== 1,
+                                        }),
+                                      });
+                                      const refreshed = await api.json<{
+                                        ok: boolean;
+                                        pricingTiers: PricingTierRecord[];
+                                      }>("/api/v1/admin");
+                                      setAdminPricingTiers(refreshed.pricingTiers || []);
+                                    }}
+                                    className="text-emerald-900 hover:underline"
+                                  >
+                                    {Number(tier.is_active) === 1 ? "Deactivate" : "Activate"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      await api.json(`/api/v1/admin/pricing-tiers/${tier.id}`, {
+                                        method: "DELETE",
+                                      });
+                                      const refreshed = await api.json<{
+                                        ok: boolean;
+                                        pricingTiers: PricingTierRecord[];
+                                      }>("/api/v1/admin");
+                                      setAdminPricingTiers(refreshed.pricingTiers || []);
+                                    }}
+                                    className="text-rose-700 hover:underline"
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

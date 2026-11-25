@@ -2,8 +2,16 @@ import crypto from "node:crypto";
 import path from "node:path";
 import express from "express";
 import type { NextFunction, Response } from "express";
+import JSZip from "jszip";
 import multer from "multer";
 import { z } from "zod";
+import {
+  DEFAULT_MAX_ZIP_BYTES,
+  ZipSecurityError,
+  getZipManifest,
+  readZipEntry,
+  saveZipArchive,
+} from "../../server/zipStorage.ts";
 import { FieldManifestUpdateSchema } from "../lib/formifypdf/manifest-schema.ts";
 import type {
   AcroFormValidationReport,
@@ -278,10 +286,65 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     limits: { fileSize: maxPdfBytes, files: 1, fields: 8 },
   });
 
+  const zipUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: DEFAULT_MAX_ZIP_BYTES, files: 1, fields: 4 },
+  });
+
   const supportingUpload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: maxSupportingBytes, files: 10, fields: 10 },
   });
+
+  function getTenantFeatureToggles(db: ReturnType<typeof getDatabase>, tenantId: string) {
+    const row = db
+      .prepare(
+        "SELECT top_tier_zip_upload, top_tier_zip_download, normal_upload, normal_download FROM tenants WHERE id = ?"
+      )
+      .get(tenantId) as
+      | {
+          top_tier_zip_upload: number;
+          top_tier_zip_download: number;
+          normal_upload: number;
+          normal_download: number;
+        }
+      | undefined;
+
+    return {
+      topTierZipUpload: (row?.top_tier_zip_upload ?? 1) === 1,
+      topTierZipDownload: (row?.top_tier_zip_download ?? 1) === 1,
+      normalUpload: (row?.normal_upload ?? 1) === 1,
+      normalDownload: (row?.normal_download ?? 1) === 1,
+    };
+  }
+
+  interface DbPricingTierRow {
+    id: string;
+    tenant_id: string;
+    name: string;
+    max_pages: number;
+    price_cents: number;
+    description: string;
+    is_active: number;
+    created_at: string;
+  }
+
+  function getActivePricingTiers(db: ReturnType<typeof getDatabase>, tenantId: string): DbPricingTierRow[] {
+    return db
+      .prepare(
+        "SELECT id, tenant_id, name, max_pages, price_cents, description, is_active, created_at FROM pricing_tiers WHERE tenant_id = ? AND is_active = 1 ORDER BY max_pages ASC"
+      )
+      .all(tenantId) as unknown as DbPricingTierRow[];
+  }
+
+  function matchServerPricingTier(pageCount: number, tiers: DbPricingTierRow[]): DbPricingTierRow | null {
+    const activeSorted = tiers
+      .filter((t) => Number(t.is_active) === 1 && Number(t.max_pages) > 0)
+      .sort((a, b) => Number(a.max_pages) - Number(b.max_pages));
+    if (activeSorted.length === 0) return null;
+    const safePages = Math.max(1, pageCount);
+    return activeSorted.find((t) => safePages <= Number(t.max_pages)) ?? activeSorted[activeSorted.length - 1];
+  }
 
   // Security headers + API request logging
   router.use((req: AuthedRequest, res: Response, next: NextFunction) => {
@@ -992,6 +1055,15 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     requireAuth,
     requirePermission("documents:write"),
     (req: AuthedRequest, res) => {
+      const preToggles = getTenantFeatureToggles(getDatabase(), req.principal!.tenantId);
+      if (!preToggles.normalUpload) {
+        res.status(403).json({
+          ok: false,
+          error: "PDF upload is currently disabled by administrator settings.",
+        });
+        return;
+      }
+
       pdfUpload.single("file")(req, res, async (multerErr: unknown) => {
         if (multerErr) {
           if (multerErr instanceof multer.MulterError && multerErr.code === "LIMIT_FILE_SIZE") {
@@ -1220,6 +1292,14 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     async (req: AuthedRequest, res) => {
       const db = getDatabase();
       const tid = req.principal!.tenantId;
+      const toggles = getTenantFeatureToggles(db, tid);
+      if (!toggles.normalDownload) {
+        res.status(403).json({
+          ok: false,
+          error: "PDF download is currently disabled by administrator settings.",
+        });
+        return;
+      }
       const doc = db
         .prepare(
           "SELECT id, title, original_filename FROM documents WHERE id = ? AND tenant_id = ?"
@@ -3277,49 +3357,774 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
 
   //
 // -------------------------------------------------------------------------
-// ADMIN ROUTE GROUP — Protected by requireAuth + administrator role
-// -------------------------------------------------------------------------
-//
-  
-  function getTenantFeatureToggles(db: ReturnType<typeof getDatabase>, tenantId: string) {
-    const row = db
-      .prepare(
-        "SELECT top_tier_zip_upload, top_tier_zip_download, normal_upload, normal_download FROM tenants WHERE id = ?"
-      )
-      .get(tenantId) as
+  // -------------------------------------------------------------------------
+  // PUBLIC CONVERSION ROUTE GROUP — Client Upload, Preview, Checkout & Download
+  // -------------------------------------------------------------------------
+  const PUBLIC_TENANT_ID = "tenant_default";
+
+  function resolvePublicConversion(
+    req: express.Request,
+    res: Response
+  ): {
+    conversion: {
+      id: string;
+      tenant_id: string;
+      document_id: string;
+      job_id: string | null;
+      access_token_hash: string;
+      source_type: string;
+      zip_archive_id: string | null;
+      archive_filename: string | null;
+      extra_page_count: number;
+      paid: number;
+      paid_tier_id: string | null;
+      paid_tier_name: string | null;
+      paid_amount_cents: number | null;
+      paid_at: string | null;
+    };
+  } | null {
+    const db = getDatabase();
+    const conv = db
+      .prepare("SELECT * FROM public_conversions WHERE id = ? AND tenant_id = ?")
+      .get(req.params.id, PUBLIC_TENANT_ID) as
       | {
-          top_tier_zip_upload: number;
-          top_tier_zip_download: number;
-          normal_upload: number;
-          normal_download: number;
+          id: string;
+          tenant_id: string;
+          document_id: string;
+          job_id: string | null;
+          access_token_hash: string;
+          source_type: string;
+          zip_archive_id: string | null;
+          archive_filename: string | null;
+          extra_page_count: number;
+          paid: number;
+          paid_tier_id: string | null;
+          paid_tier_name: string | null;
+          paid_amount_cents: number | null;
+          paid_at: string | null;
         }
       | undefined;
 
-    return {
-      topTierZipUpload: (row?.top_tier_zip_upload ?? 1) === 1,
-      topTierZipDownload: (row?.top_tier_zip_download ?? 1) === 1,
-      normalUpload: (row?.normal_upload ?? 1) === 1,
-      normalDownload: (row?.normal_download ?? 1) === 1,
-    };
+    if (!conv) {
+      res.status(404).json({ ok: false, error: "Conversion record not found." });
+      return null;
+    }
+
+    const rawToken =
+      typeof req.headers["x-conversion-token"] === "string"
+        ? req.headers["x-conversion-token"].trim()
+        : "";
+    if (!rawToken) {
+      res.status(401).json({ ok: false, error: "Conversion access token required." });
+      return null;
+    }
+    const presentedHash = hashToken(rawToken);
+    if (
+      presentedHash.length !== conv.access_token_hash.length ||
+      !crypto.timingSafeEqual(Buffer.from(presentedHash), Buffer.from(conv.access_token_hash))
+    ) {
+      res.status(403).json({ ok: false, error: "Invalid conversion access token." });
+      return null;
+    }
+
+    return { conversion: conv };
   }
 
+  router.get("/public/config", (_req, res) => {
+    const db = getDatabase();
+    const toggles = getTenantFeatureToggles(db, PUBLIC_TENANT_ID);
+    const pricingTiers = getActivePricingTiers(db, PUBLIC_TENANT_ID);
+    res.json({ ok: true, toggles, pricingTiers });
+  });
+
+  router.post("/public/documents", limiter, (req, res) => {
+    const db = getDatabase();
+    const toggles = getTenantFeatureToggles(db, PUBLIC_TENANT_ID);
+    if (!toggles.normalUpload) {
+      res.status(403).json({
+        ok: false,
+        error: "PDF upload is currently disabled by administrator settings.",
+      });
+      return;
+    }
+
+    pdfUpload.single("file")(req, res, async (multerErr: unknown) => {
+      if (multerErr) {
+        if (multerErr instanceof multer.MulterError && multerErr.code === "LIMIT_FILE_SIZE") {
+          res.status(413).json({
+            ok: false,
+            error: `PDF exceeds maximum allowed upload size of ${Math.round(maxPdfBytes / (1024 * 1024))} MB.`,
+          });
+          return;
+        }
+        res.status(400).json({ ok: false, error: "Invalid multipart PDF upload." });
+        return;
+      }
+
+      const file = req.file;
+      if (!file || !file.buffer) {
+        res.status(400).json({ ok: false, error: "No PDF file was uploaded." });
+        return;
+      }
+      if (!file.originalname.toLowerCase().endsWith(".pdf")) {
+        res.status(400).json({ ok: false, error: "Only .pdf files are supported." });
+        return;
+      }
+
+      const sig = validatePdfBufferSignature(file.buffer);
+      if (!sig.valid) {
+        res.status(400).json({ ok: false, error: sig.reason });
+        return;
+      }
+
+      const stored = saveStorageBuffer("originals", file.originalname, file.buffer);
+      const docId = `doc_${crypto.randomBytes(10).toString("hex")}`;
+      const rawTitle = path.basename(file.originalname, path.extname(file.originalname)).slice(0, 180) || "Document";
+
+      const tenant = db
+        .prepare("SELECT retention_days FROM tenants WHERE id = ?")
+        .get(PUBLIC_TENANT_ID) as { retention_days: number } | undefined;
+      const retentionDays = tenant?.retention_days ?? 30;
+      const expiresAt = new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000).toISOString();
+
+      try {
+        const abs = resolveSafeStoragePath(stored.storageKey);
+        const inspect = await runFormifyPythonEngine<{
+          pageCount: number;
+          isScanned: boolean;
+          hasExistingAcroForm: boolean;
+        }>("inspect", { pdfPath: abs });
+
+        db.prepare(`
+          INSERT INTO documents (
+            id, tenant_id, uploaded_by, title, original_filename, sha256, byte_size,
+            page_count, is_scanned, has_existing_acroform, status, source_storage_key, retention_expires_at
+          ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)
+        `).run(
+          docId,
+          PUBLIC_TENANT_ID,
+          rawTitle,
+          path.basename(file.originalname),
+          stored.sha256,
+          stored.byteSize,
+          inspect.pageCount,
+          inspect.isScanned ? 1 : 0,
+          inspect.hasExistingAcroForm ? 1 : 0,
+          stored.storageKey,
+          expiresAt
+        );
+
+        db.prepare(`
+          INSERT INTO storage_metadata (
+            id, tenant_id, provider, storage_key, bucket_or_dir, content_type, byte_size, sha256, classification, retention_expires_at
+          ) VALUES (?, ?, 'local', ?, 'originals', 'application/pdf', ?, ?, 'original', ?)
+        `).run(
+          `stm_${crypto.randomBytes(8).toString("hex")}`,
+          PUBLIC_TENANT_ID,
+          stored.storageKey,
+          stored.byteSize,
+          stored.sha256,
+          expiresAt
+        );
+
+        const jobId = `job_${crypto.randomBytes(10).toString("hex")}`;
+        db.prepare(`
+          INSERT INTO analysis_jobs (
+            id, tenant_id, document_id, triggered_by, job_type, stage, progress_pct, status, options_json
+          ) VALUES (?, ?, ?, NULL, 'full_analysis', 'queued', 5, 'queued', ?)
+        `).run(
+          jobId,
+          PUBLIC_TENANT_ID,
+          docId,
+          JSON.stringify({
+            enableOcr: true,
+            forceOcr: false,
+            ocrLanguage: "eng",
+            autoGenerateAcroForm: true,
+          })
+        );
+        enqueueAnalysisJob(jobId);
+
+        const convId = `conv_${crypto.randomBytes(10).toString("hex")}`;
+        const accessToken = crypto.randomBytes(24).toString("hex");
+        db.prepare(`
+          INSERT INTO public_conversions (
+            id, tenant_id, document_id, job_id, access_token_hash, source_type, paid
+          ) VALUES (?, ?, ?, ?, ?, 'pdf', 0)
+        `).run(convId, PUBLIC_TENANT_ID, docId, jobId, hashToken(accessToken));
+
+        res.status(201).json({
+          ok: true,
+          conversionId: convId,
+          accessToken,
+          jobId,
+          document: {
+            id: docId,
+            title: rawTitle,
+            originalFilename: path.basename(file.originalname),
+            pageCount: inspect.pageCount,
+            isScanned: inspect.isScanned,
+            hasExistingAcroForm: inspect.hasExistingAcroForm,
+            byteSize: stored.byteSize,
+          },
+        });
+      } catch (err) {
+        deleteStorageObject(stored.storageKey);
+        const msg = err instanceof Error ? err.message : "Invalid PDF";
+        res.status(422).json({ ok: false, error: msg });
+      }
+    });
+  });
+
+  router.post("/public/zip-upload", limiter, (req, res) => {
+    const db = getDatabase();
+    const toggles = getTenantFeatureToggles(db, PUBLIC_TENANT_ID);
+    if (!toggles.topTierZipUpload) {
+      res.status(403).json({
+        ok: false,
+        error: "ZIP upload is currently disabled by administrator settings.",
+      });
+      return;
+    }
+
+    zipUpload.single("file")(req, res, async (multerErr: unknown) => {
+      if (multerErr) {
+        if (multerErr instanceof multer.MulterError && multerErr.code === "LIMIT_FILE_SIZE") {
+          res.status(413).json({
+            ok: false,
+            error: `ZIP file exceeds the ${Math.round(DEFAULT_MAX_ZIP_BYTES / (1024 * 1024))} MB limit.`,
+          });
+          return;
+        }
+        res.status(400).json({ ok: false, error: "Invalid multipart ZIP upload." });
+        return;
+      }
+
+      const file = req.file;
+      if (!file || !file.buffer) {
+        res.status(400).json({ ok: false, error: "No ZIP file was uploaded." });
+        return;
+      }
+
+      const originalName = (file.originalname || "").trim();
+      if (!originalName.toLowerCase().endsWith(".zip")) {
+        res.status(400).json({ ok: false, error: "Only .zip archive files are permitted." });
+        return;
+      }
+
+      let storedKey: string | null = null;
+      try {
+        const archiveManifest = await saveZipArchive(file.buffer, originalName);
+        const pdfEntries = archiveManifest.files.filter(
+          (entry) =>
+            entry.path.toLowerCase().endsWith(".pdf") &&
+            !entry.path.startsWith("__MACOSX/") &&
+            !path.basename(entry.path).startsWith("._") &&
+            entry.size > 0
+        );
+
+        if (pdfEntries.length === 0) {
+          res.status(400).json({
+            ok: false,
+            error: "The uploaded ZIP archive does not contain any PDF files to convert.",
+          });
+          return;
+        }
+
+        const primaryEntry = pdfEntries[0];
+        const primaryRead = await readZipEntry(archiveManifest.id, primaryEntry.path);
+        if (!primaryRead) {
+          res.status(400).json({ ok: false, error: "Unable to read PDF from ZIP archive." });
+          return;
+        }
+
+        const sig = validatePdfBufferSignature(primaryRead.buffer);
+        if (!sig.valid) {
+          res.status(400).json({ ok: false, error: sig.reason });
+          return;
+        }
+
+        const stored = saveStorageBuffer("originals", path.basename(primaryEntry.path), primaryRead.buffer);
+        storedKey = stored.storageKey;
+        const abs = resolveSafeStoragePath(stored.storageKey);
+        const inspect = await runFormifyPythonEngine<{
+          pageCount: number;
+          isScanned: boolean;
+          hasExistingAcroForm: boolean;
+        }>("inspect", { pdfPath: abs });
+
+        let extraPageCount = 0;
+        for (const extraEntry of pdfEntries.slice(1)) {
+          const extraRead = await readZipEntry(archiveManifest.id, extraEntry.path);
+          if (!extraRead) continue;
+          const extraSig = validatePdfBufferSignature(extraRead.buffer);
+          if (!extraSig.valid) continue;
+          const tmpStored = saveStorageBuffer("originals", path.basename(extraEntry.path), extraRead.buffer);
+          try {
+            const extraInspect = await runFormifyPythonEngine<{ pageCount: number }>("inspect", {
+              pdfPath: resolveSafeStoragePath(tmpStored.storageKey),
+            });
+            extraPageCount += Math.max(1, extraInspect.pageCount || 1);
+          } finally {
+            deleteStorageObject(tmpStored.storageKey);
+          }
+        }
+
+        const docId = `doc_${crypto.randomBytes(10).toString("hex")}`;
+        const rawTitle =
+          path.basename(primaryEntry.path, path.extname(primaryEntry.path)).slice(0, 180) || "Archive Form";
+
+        const tenant = db
+          .prepare("SELECT retention_days FROM tenants WHERE id = ?")
+          .get(PUBLIC_TENANT_ID) as { retention_days: number } | undefined;
+        const retentionDays = tenant?.retention_days ?? 30;
+        const expiresAt = new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000).toISOString();
+
+        db.prepare(`
+          INSERT INTO documents (
+            id, tenant_id, uploaded_by, title, original_filename, sha256, byte_size,
+            page_count, is_scanned, has_existing_acroform, status, source_storage_key, retention_expires_at
+          ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)
+        `).run(
+          docId,
+          PUBLIC_TENANT_ID,
+          rawTitle,
+          path.basename(primaryEntry.path),
+          stored.sha256,
+          stored.byteSize,
+          inspect.pageCount,
+          inspect.isScanned ? 1 : 0,
+          inspect.hasExistingAcroForm ? 1 : 0,
+          stored.storageKey,
+          expiresAt
+        );
+
+        db.prepare(`
+          INSERT INTO storage_metadata (
+            id, tenant_id, provider, storage_key, bucket_or_dir, content_type, byte_size, sha256, classification, retention_expires_at
+          ) VALUES (?, ?, 'local', ?, 'originals', 'application/pdf', ?, ?, 'original', ?)
+        `).run(
+          `stm_${crypto.randomBytes(8).toString("hex")}`,
+          PUBLIC_TENANT_ID,
+          stored.storageKey,
+          stored.byteSize,
+          stored.sha256,
+          expiresAt
+        );
+
+        const jobId = `job_${crypto.randomBytes(10).toString("hex")}`;
+        db.prepare(`
+          INSERT INTO analysis_jobs (
+            id, tenant_id, document_id, triggered_by, job_type, stage, progress_pct, status, options_json
+          ) VALUES (?, ?, ?, NULL, 'full_analysis', 'queued', 5, 'queued', ?)
+        `).run(
+          jobId,
+          PUBLIC_TENANT_ID,
+          docId,
+          JSON.stringify({
+            enableOcr: true,
+            forceOcr: false,
+            ocrLanguage: "eng",
+            autoGenerateAcroForm: true,
+          })
+        );
+        enqueueAnalysisJob(jobId);
+
+        const convId = `conv_${crypto.randomBytes(10).toString("hex")}`;
+        const accessToken = crypto.randomBytes(24).toString("hex");
+        db.prepare(`
+          INSERT INTO public_conversions (
+            id, tenant_id, document_id, job_id, access_token_hash, source_type, zip_archive_id, archive_filename, extra_page_count, paid
+          ) VALUES (?, ?, ?, ?, ?, 'zip', ?, ?, ?, 0)
+        `).run(
+          convId,
+          PUBLIC_TENANT_ID,
+          docId,
+          jobId,
+          hashToken(accessToken),
+          archiveManifest.id,
+          archiveManifest.originalFilename,
+          extraPageCount
+        );
+
+        res.status(201).json({
+          ok: true,
+          conversionId: convId,
+          accessToken,
+          jobId,
+          archiveFilename: archiveManifest.originalFilename,
+          zipFileCount: archiveManifest.fileCount,
+          document: {
+            id: docId,
+            title: rawTitle,
+            originalFilename: path.basename(primaryEntry.path),
+            pageCount: inspect.pageCount + extraPageCount,
+            isScanned: inspect.isScanned,
+            hasExistingAcroForm: inspect.hasExistingAcroForm,
+            byteSize: stored.byteSize,
+          },
+        });
+      } catch (err) {
+        if (storedKey) {
+          deleteStorageObject(storedKey);
+        }
+        if (err instanceof ZipSecurityError) {
+          res.status(err.statusCode).json({ ok: false, error: err.message });
+          return;
+        }
+        res.status(422).json({
+          ok: false,
+          error: err instanceof Error ? err.message : "Failed to process ZIP upload.",
+        });
+      }
+    });
+  });
+
+  router.get("/public/conversions/:id", (req, res) => {
+    const resolved = resolvePublicConversion(req, res);
+    if (!resolved) return;
+    const { conversion } = resolved;
+    const db = getDatabase();
+
+    const doc = db
+      .prepare("SELECT id, title, original_filename, page_count, status, is_scanned, byte_size FROM documents WHERE id = ?")
+      .get(conversion.document_id) as
+      | {
+          id: string;
+          title: string;
+          original_filename: string;
+          page_count: number;
+          status: string;
+          is_scanned: number;
+          byte_size: number;
+        }
+      | undefined;
+
+    if (!doc) {
+      res.status(404).json({ ok: false, error: "Document not found." });
+      return;
+    }
+
+    const job = conversion.job_id
+      ? (db
+          .prepare(
+            "SELECT id, document_id, job_type, stage, progress_pct, status, error_code, error_message, created_at, completed_at FROM analysis_jobs WHERE id = ?"
+          )
+          .get(conversion.job_id) as Record<string, unknown> | undefined)
+      : undefined;
+
+    const latestManifest = db
+      .prepare(
+        "SELECT field_count FROM field_manifests WHERE document_id = ? ORDER BY version_number DESC LIMIT 1"
+      )
+      .get(doc.id) as { field_count: number } | undefined;
+
+    const latestAsset = db
+      .prepare(
+        "SELECT id, widget_count, byte_size FROM acroform_assets WHERE document_id = ? ORDER BY created_at DESC LIMIT 1"
+      )
+      .get(doc.id) as { id: string; widget_count: number; byte_size: number } | undefined;
+
+    const totalPages = Math.max(1, (doc.page_count || 1) + (conversion.extra_page_count || 0));
+    const pricingTiers = getActivePricingTiers(db, PUBLIC_TENANT_ID);
+    const matchedTier = matchServerPricingTier(totalPages, pricingTiers);
+    const toggles = getTenantFeatureToggles(db, PUBLIC_TENANT_ID);
+
+    res.json({
+      ok: true,
+      conversion: {
+        id: conversion.id,
+        documentId: doc.id,
+        jobId: conversion.job_id,
+        sourceType: conversion.source_type,
+        archiveFilename: conversion.archive_filename,
+        originalFilename: doc.original_filename,
+        title: doc.title,
+        pageCount: totalPages,
+        fieldCount: latestManifest?.field_count ?? 0,
+        widgetCount: latestAsset?.widget_count ?? latestManifest?.field_count ?? 0,
+        acroformByteSize: latestAsset?.byte_size ?? doc.byte_size,
+        paid: conversion.paid === 1,
+        paidTierId: conversion.paid_tier_id,
+        paidTierName: conversion.paid_tier_name,
+        paidAmountCents: conversion.paid_amount_cents,
+        job: job ?? null,
+      },
+      matchedTier,
+      pricingTiers,
+      toggles,
+    });
+  });
+
+  router.get("/public/conversions/:id/preview", async (req, res) => {
+    const resolved = resolvePublicConversion(req, res);
+    if (!resolved) return;
+    const { conversion } = resolved;
+    const db = getDatabase();
+
+    const doc = db
+      .prepare("SELECT id, title, original_filename, source_storage_key FROM documents WHERE id = ?")
+      .get(conversion.document_id) as
+      | { id: string; title: string; original_filename: string; source_storage_key: string }
+      | undefined;
+
+    if (!doc) {
+      res.status(404).json({ ok: false, error: "Document not found." });
+      return;
+    }
+
+    let asset = db
+      .prepare(
+        "SELECT storage_key FROM acroform_assets WHERE document_id = ? AND tenant_id = ? ORDER BY created_at DESC LIMIT 1"
+      )
+      .get(doc.id, PUBLIC_TENANT_ID) as { storage_key: string } | undefined;
+
+    if (!asset) {
+      const latestMan = db
+        .prepare(
+          "SELECT id, manifest_json FROM field_manifests WHERE document_id = ? AND tenant_id = ? ORDER BY version_number DESC LIMIT 1"
+        )
+        .get(doc.id, PUBLIC_TENANT_ID) as { id: string; manifest_json: string } | undefined;
+      if (latestMan) {
+        try {
+          const generated = await generateAcroFormAssetForDocument({
+            tenantId: PUBLIC_TENANT_ID,
+            documentId: doc.id,
+            manifestId: latestMan.id,
+            manifest: JSON.parse(latestMan.manifest_json) as FieldManifest,
+            actorUserId: null,
+          });
+          asset = { storage_key: generated.storageKey };
+        } catch {
+          // Fall back to source PDF if AcroForm generation failed
+        }
+      }
+    }
+
+    const buf = asset ? readStorageBuffer(asset.storage_key) : readStorageBuffer(doc.source_storage_key);
+    if (!buf) {
+      res.status(404).json({ ok: false, error: "Preview PDF not available yet." });
+      return;
+    }
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename='${sanitizeHeaderFilename(doc.original_filename)}'`);
+    res.send(buf);
+  });
+
+  router.post("/public/conversions/:id/checkout", (req, res) => {
+    const resolved = resolvePublicConversion(req, res);
+    if (!resolved) return;
+    const { conversion } = resolved;
+    const db = getDatabase();
+
+    const doc = db
+      .prepare("SELECT id, page_count FROM documents WHERE id = ?")
+      .get(conversion.document_id) as { id: string; page_count: number } | undefined;
+
+    if (!doc) {
+      res.status(404).json({ ok: false, error: "Document not found." });
+      return;
+    }
+
+    const totalPages = Math.max(1, (doc.page_count || 1) + (conversion.extra_page_count || 0));
+    const activeTiers = getActivePricingTiers(db, PUBLIC_TENANT_ID);
+    const matchedTier = matchServerPricingTier(totalPages, activeTiers);
+
+    if (!matchedTier) {
+      res.status(400).json({ ok: false, error: "No active pricing tier available for checkout." });
+      return;
+    }
+
+    const requestedTierId = typeof req.body?.tierId === "string" ? req.body.tierId.trim() : "";
+    if (requestedTierId && requestedTierId !== matchedTier.id) {
+      res.status(400).json({
+        ok: false,
+        error: "Selected tier does not match the active tier for this page count.",
+      });
+      return;
+    }
+
+    db.prepare(`
+      UPDATE public_conversions
+      SET paid = 1, paid_tier_id = ?, paid_tier_name = ?, paid_amount_cents = ?, paid_at = datetime('now')
+      WHERE id = ?
+    `).run(matchedTier.id, matchedTier.name, matchedTier.price_cents, conversion.id);
+
+    logAuditEvent({
+      tenantId: PUBLIC_TENANT_ID,
+      actorUserId: null,
+      actorEmail: "public-visitor",
+      action: "public.checkout_confirmed",
+      resourceType: "public_conversion",
+      resourceId: conversion.id,
+      metadata: {
+        tierId: matchedTier.id,
+        tierName: matchedTier.name,
+        priceCents: matchedTier.price_cents,
+        pageCount: totalPages,
+      },
+    });
+
+    res.json({
+      ok: true,
+      paid: true,
+      tier: matchedTier,
+    });
+  });
+
+  router.get("/public/conversions/:id/download", async (req, res) => {
+    const resolved = resolvePublicConversion(req, res);
+    if (!resolved) return;
+    const { conversion } = resolved;
+    const db = getDatabase();
+
+    const toggles = getTenantFeatureToggles(db, PUBLIC_TENANT_ID);
+    if (!toggles.normalDownload) {
+      res.status(403).json({
+        ok: false,
+        error: "PDF download is currently disabled by administrator settings.",
+      });
+      return;
+    }
+
+    if (conversion.paid !== 1) {
+      res.status(402).json({
+        ok: false,
+        error: "Payment for the matched page tier is required before downloading.",
+      });
+      return;
+    }
+
+    const doc = db
+      .prepare("SELECT id, title, original_filename FROM documents WHERE id = ?")
+      .get(conversion.document_id) as
+      | { id: string; title: string; original_filename: string }
+      | undefined;
+
+    if (!doc) {
+      res.status(404).json({ ok: false, error: "Document not found." });
+      return;
+    }
+
+    const asset = db
+      .prepare(
+        "SELECT storage_key FROM acroform_assets WHERE document_id = ? AND tenant_id = ? ORDER BY created_at DESC LIMIT 1"
+      )
+      .get(doc.id, PUBLIC_TENANT_ID) as { storage_key: string } | undefined;
+
+    const buf = asset ? readStorageBuffer(asset.storage_key) : null;
+    if (!buf) {
+      res.status(404).json({ ok: false, error: "Converted AcroForm PDF is not ready yet." });
+      return;
+    }
+
+    const rawBase = (doc.title || doc.original_filename || "document").replace(/\.pdf$/i, "");
+    const cleanSlug =
+      rawBase
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 64) || "document";
+    const downloadName = sanitizeHeaderFilename(`${cleanSlug}-fillable-acroform.pdf`);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename='${downloadName}'`);
+    res.send(buf);
+  });
+
+  router.get("/public/conversions/:id/zip-download", async (req, res) => {
+    const resolved = resolvePublicConversion(req, res);
+    if (!resolved) return;
+    const { conversion } = resolved;
+    const db = getDatabase();
+
+    const toggles = getTenantFeatureToggles(db, PUBLIC_TENANT_ID);
+    if (!toggles.topTierZipDownload) {
+      res.status(403).json({
+        ok: false,
+        error: "ZIP download is currently disabled by administrator settings.",
+      });
+      return;
+    }
+
+    if (conversion.paid !== 1) {
+      res.status(402).json({
+        ok: false,
+        error: "Payment for the matched page tier is required before downloading the ZIP archive.",
+      });
+      return;
+    }
+
+    const doc = db
+      .prepare("SELECT id, title, original_filename FROM documents WHERE id = ?")
+      .get(conversion.document_id) as
+      | { id: string; title: string; original_filename: string }
+      | undefined;
+
+    if (!doc) {
+      res.status(404).json({ ok: false, error: "Document not found." });
+      return;
+    }
+
+    const asset = db
+      .prepare(
+        "SELECT storage_key FROM acroform_assets WHERE document_id = ? AND tenant_id = ? ORDER BY created_at DESC LIMIT 1"
+      )
+      .get(doc.id, PUBLIC_TENANT_ID) as { storage_key: string } | undefined;
+
+    const pdfBuf = asset ? readStorageBuffer(asset.storage_key) : null;
+    if (!pdfBuf) {
+      res.status(404).json({ ok: false, error: "Converted AcroForm PDF is not ready yet." });
+      return;
+    }
+
+    const rawBase = (doc.title || doc.original_filename || "document").replace(/\.pdf$/i, "");
+    const cleanSlug =
+      rawBase
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 64) || "document";
+
+    const outZip = new JSZip();
+    outZip.file(`${cleanSlug}-fillable-acroform.pdf`, pdfBuf);
+
+    if (conversion.zip_archive_id) {
+      const archiveManifest = await getZipManifest(conversion.zip_archive_id).catch(() => null);
+      if (archiveManifest) {
+        for (const entry of archiveManifest.files) {
+          if (entry.path.startsWith("__MACOSX/") || path.basename(entry.path).startsWith("._")) {
+            continue;
+          }
+          if (entry.path.toLowerCase().endsWith(".pdf")) {
+            continue;
+          }
+          const entryData = await readZipEntry(archiveManifest.id, entry.path).catch(() => null);
+          if (entryData) {
+            outZip.file(entryData.safeRelPath, entryData.buffer);
+          }
+        }
+      }
+    }
+
+    const zipBuffer = await outZip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+    const zipFilename = sanitizeHeaderFilename(`${cleanSlug}-fillable-bundle.zip`, "formifypdf-bundle.zip");
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename='${zipFilename}'`);
+    res.send(zipBuffer);
+  });
+
+  // -------------------------------------------------------------------------
+  // ADMIN ROUTE GROUP — Protected by requireAuth + administrator role
+  // -------------------------------------------------------------------------
   router.get("/admin", requireAuth, requirePermission("settings:manage"), (req: AuthedRequest, res) => {
     const db = getDatabase();
     const tid = req.principal!.tenantId;
 
-    // Feature toggle states
-    const togglesRow = db
-      .prepare(
-        "SELECT top_tier_zip_upload, top_tier_zip_download, normal_upload, normal_download FROM tenants WHERE id = ?"
-      )
-      .get(tid) as {
-        top_tier_zip_upload: number;
-        top_tier_zip_download: number;
-        normal_upload: number;
-        normal_download: number;
-      };
+    const toggles = getTenantFeatureToggles(db, tid);
 
-    // Pricing tiers
     const tiers = db
       .prepare("SELECT * FROM pricing_tiers WHERE tenant_id = ? ORDER BY max_pages ASC")
       .all(tid) as Array<{
@@ -3335,12 +4140,7 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     res.json({
       ok: true,
       tenantId: tid,
-      toggles: {
-        topTierZipUpload: togglesRow?.top_tier_zip_upload === 1,
-        topTierZipDownload: togglesRow?.top_tier_zip_download === 1,
-        normalUpload: togglesRow?.normal_upload === 1,
-        normalDownload: togglesRow?.normal_download === 1,
-      },
+      toggles,
       pricingTiers: tiers,
     });
   });
@@ -3387,16 +4187,33 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       const db = getDatabase();
       const tid = req.principal!.tenantId;
       const { name, maxPages, priceCents, description } = req.body;
-      if (!name || typeof name !== "string" || Number(maxPages) <= 0 || Number(priceCents) < 0 || Number.isNaN(Number(maxPages)) || Number.isNaN(Number(priceCents))) {
+      const parsedMaxPages = Number(maxPages);
+      const parsedPriceCents = Number(priceCents);
+      if (
+        !name ||
+        typeof name !== "string" ||
+        !name.trim() ||
+        !Number.isInteger(parsedMaxPages) ||
+        parsedMaxPages <= 0 ||
+        !Number.isInteger(parsedPriceCents) ||
+        parsedPriceCents < 0
+      ) {
         return res.status(400).json({ ok: false, error: "Invalid pricing tier fields." });
       }
-      const id = `tier_${maxPages}_${priceCents}`;
+      const id = `tier_${parsedMaxPages}_${parsedPriceCents}`;
 
       db.prepare(
         "INSERT OR REPLACE INTO pricing_tiers (id, tenant_id, name, max_pages, price_cents, description, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)"
-      ).run(id, tid, name, maxPages, priceCents, description || '');
+      ).run(
+        id,
+        tid,
+        name.trim(),
+        parsedMaxPages,
+        parsedPriceCents,
+        typeof description === "string" ? description.trim() : ""
+      );
 
-      res.json({ ok: true });
+      res.json({ ok: true, id });
     }
   );
 
@@ -3407,33 +4224,55 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
     (req: AuthedRequest, res) => {
       const db = getDatabase();
       const tid = req.principal!.tenantId;
-      const { name, priceCents, description, isActive } = req.body;
+      const { name, maxPages, priceCents, description, isActive } = req.body;
       const tierId = req.params.id;
 
+      const existing = db
+        .prepare("SELECT id FROM pricing_tiers WHERE id = ? AND tenant_id = ?")
+        .get(tierId, tid);
+      if (!existing) {
+        return res.status(404).json({ ok: false, error: "Pricing tier not found." });
+      }
+
       const updates: string[] = [];
-      const values: any[] = [];
+      const values: Array<string | number> = [];
 
       if (name !== undefined) {
+        if (typeof name !== "string" || !name.trim()) {
+          return res.status(400).json({ ok: false, error: "Invalid pricing tier name." });
+        }
         updates.push("name = ?");
-        values.push(name);
+        values.push(name.trim());
+      }
+      if (maxPages !== undefined) {
+        const parsedMaxPages = Number(maxPages);
+        if (!Number.isInteger(parsedMaxPages) || parsedMaxPages <= 0) {
+          return res.status(400).json({ ok: false, error: "Invalid maxPages value." });
+        }
+        updates.push("max_pages = ?");
+        values.push(parsedMaxPages);
       }
       if (priceCents !== undefined) {
+        const parsedPriceCents = Number(priceCents);
+        if (!Number.isInteger(parsedPriceCents) || parsedPriceCents < 0) {
+          return res.status(400).json({ ok: false, error: "Invalid priceCents value." });
+        }
         updates.push("price_cents = ?");
-        values.push(priceCents);
+        values.push(parsedPriceCents);
       }
       if (description !== undefined) {
         updates.push("description = ?");
-        values.push(description);
+        values.push(typeof description === "string" ? description.trim() : "");
       }
       if (isActive !== undefined) {
         updates.push("is_active = ?");
         values.push(isActive ? 1 : 0);
       }
 
-      values.push(tierId);
-      values.push(tid);
-
       if (updates.length > 0) {
+        updates.push("updated_at = datetime('now')");
+        values.push(tierId);
+        values.push(tid);
         const sql = `UPDATE pricing_tiers SET ${updates.join(", ")} WHERE id = ? AND tenant_id = ?`;
         db.prepare(sql).run(...values);
       }
@@ -3451,7 +4290,12 @@ export function createV1ApiRouter(config: V1RouterConfig = {}): express.Router {
       const tid = req.principal!.tenantId;
       const tierId = req.params.id;
 
-      db.prepare("DELETE FROM pricing_tiers WHERE id = ? AND tenant_id = ?").run(tierId, tid);
+      const result = db
+        .prepare("DELETE FROM pricing_tiers WHERE id = ? AND tenant_id = ?")
+        .run(tierId, tid);
+      if (result.changes === 0) {
+        return res.status(404).json({ ok: false, error: "Pricing tier not found." });
+      }
 
       res.json({ ok: true });
     }

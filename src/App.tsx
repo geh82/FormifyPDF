@@ -1,10 +1,17 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { PublicLandingConverter } from "./components/PublicLandingConverter.tsx";
 import { ZipInspectorSection } from "./components/ZipInspectorSection.tsx";
 import { FormifyPdfStudio } from "./components/studio/FormifyPdfStudio.tsx";
 
 type WorkspaceMode = "studio" | "zip";
 
-export default function App() {
+function isAdminPath(): boolean {
+  if (typeof window === "undefined") return false;
+  const normalized = window.location.pathname.replace(/\/+$/, "") || "/";
+  return normalized === "/admin";
+}
+
+function AdminWorkspace() {
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("studio");
 
   return (
@@ -19,7 +26,7 @@ export default function App() {
           </a>
 
           <nav
-            aria-label="Primary navigation"
+            aria-label="Admin workspace navigation"
             className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600"
           >
             <button
@@ -59,7 +66,7 @@ export default function App() {
             </h1>
             <p className="mt-2 text-sm sm:text-base text-slate-600 leading-relaxed">
               {workspaceMode === "studio"
-                ? "Analyze digital or scanned PDFs, detect form fields and character grids, generate AcroForm templates, and render output PDFs."
+                ? "Analyze digital or scanned PDFs, detect form fields and character grids, generate AcroForm templates, and manage feature toggles and pricing."
                 : "Inspect, audit, edit, clean, and repackage ZIP asset bundles safely with server-side path confinement."}
             </p>
           </div>
@@ -104,4 +111,20 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+export default function App() {
+  const [adminRoute, setAdminRoute] = useState<boolean>(() => isAdminPath());
+
+  useEffect(() => {
+    const syncRoute = () => setAdminRoute(isAdminPath());
+    window.addEventListener("popstate", syncRoute);
+    return () => window.removeEventListener("popstate", syncRoute);
+  }, []);
+
+  if (adminRoute) {
+    return <AdminWorkspace />;
+  }
+
+  return <PublicLandingConverter />;
 }

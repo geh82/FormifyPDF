@@ -16,6 +16,7 @@ describe("FormifyPDF Coordinate Calibration & Studio Frontend", () => {
 
   beforeEach(() => {
     (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+    window.history.pushState({}, "", "/admin");
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -27,6 +28,7 @@ describe("FormifyPDF Coordinate Calibration & Studio Frontend", () => {
       root.unmount();
     });
     container.remove();
+    window.history.pushState({}, "", "/");
     vi.restoreAllMocks();
   });
 
