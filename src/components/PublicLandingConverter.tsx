@@ -4,6 +4,7 @@ import pdfjsWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
   AlertCircle,
   ArrowRight,
+  Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -14,11 +15,14 @@ import {
   FileText,
   Layers,
   Lock,
+  Menu,
   ScanText,
   Sparkles,
   Unlock,
   Upload,
+  X,
 } from "lucide-react";
+import { BrandWordmark } from "./BrandMark.tsx";
 import {
   matchPricingTierForPages,
   type PricingTierRecord,
@@ -295,6 +299,7 @@ export function PublicLandingConverter() {
   const [downloadingType, setDownloadingType] = useState<"pdf" | "zip" | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const loadPublicConfig = useCallback(async () => {
     try {
@@ -561,68 +566,128 @@ export function PublicLandingConverter() {
   };
 
   return (
-    <div id="top" className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
-      {/* Top Navigation Bar — 3 clean zones, no admin links or tabs */}
-      <header className="sticky top-0 z-30 border-b border-slate-200/90 bg-white/95 backdrop-blur-sm">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 h-16 flex items-center justify-between gap-8">
+    <div id="top" className="min-h-screen flex flex-col bg-[#F7F8F7] text-slate-900">
+      {/* Top Navigation Bar — Architectural 3-zone bar, no admin links or clutter */}
+      <header className="sticky top-0 z-30 border-t-2 border-t-emerald-900 border-b border-slate-200/90 bg-white/95 backdrop-blur-md">
+        <div className="mx-auto max-w-6xl px-4 sm:px-6 h-[68px] flex items-center justify-between gap-8">
           <a
             href="#top"
-            className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
+            aria-label="FormifyPDF home"
+            className="whitespace-nowrap shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-800 rounded-md"
           >
-            FormifyPDF
+            <BrandWordmark size={28} />
           </a>
 
           <nav
             aria-label="Primary navigation"
-            className="hidden md:flex items-center gap-7 text-sm font-medium text-slate-600"
+            className="hidden md:flex items-center gap-8 text-sm font-medium text-slate-600"
           >
             <a
+              href="#convert-workspace"
+              className="py-1 hover:text-slate-900 hover:underline underline-offset-8 decoration-emerald-800/80 decoration-2 transition-colors whitespace-nowrap shrink-0"
+            >
+              Convert
+            </a>
+            <a
               href="#how-it-works"
-              className="hover:text-slate-900 hover:underline underline-offset-4 whitespace-nowrap shrink-0"
+              className="py-1 hover:text-slate-900 hover:underline underline-offset-8 decoration-emerald-800/80 decoration-2 transition-colors whitespace-nowrap shrink-0"
             >
               How It Works
             </a>
             <a
               href="#capabilities"
-              className="hover:text-slate-900 hover:underline underline-offset-4 whitespace-nowrap shrink-0"
+              className="py-1 hover:text-slate-900 hover:underline underline-offset-8 decoration-emerald-800/80 decoration-2 transition-colors whitespace-nowrap shrink-0"
             >
               Capabilities
             </a>
             <a
               href="#pricing"
-              className="hover:text-slate-900 hover:underline underline-offset-4 whitespace-nowrap shrink-0"
+              className="py-1 hover:text-slate-900 hover:underline underline-offset-8 decoration-emerald-800/80 decoration-2 transition-colors whitespace-nowrap shrink-0"
             >
               Pricing
             </a>
+          </nav>
+
+          <div className="flex items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setMobileMenuOpen(false);
+                scrollToWorkspace();
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-900 px-4 py-2 text-xs sm:text-sm font-semibold text-white hover:bg-emerald-800 transition-colors shadow-xs whitespace-nowrap shrink-0"
+            >
+              <span>Start Converting</span>
+              <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              aria-label={mobileMenuOpen ? "Close menu" : "Open menu"}
+              aria-expanded={mobileMenuOpen}
+              onClick={() => setMobileMenuOpen((prev) => !prev)}
+              className="md:hidden inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-2 text-slate-700 hover:bg-slate-50"
+            >
+              {mobileMenuOpen ? (
+                <X className="h-4 w-4" aria-hidden="true" />
+              ) : (
+                <Menu className="h-4 w-4" aria-hidden="true" />
+              )}
+            </button>
+          </div>
+        </div>
+
+        {mobileMenuOpen && (
+          <nav
+            aria-label="Mobile navigation"
+            className="md:hidden border-t border-slate-200 bg-white px-4 py-3 flex flex-col gap-1 text-sm font-medium text-slate-700"
+          >
             <a
               href="#convert-workspace"
-              className="hover:text-slate-900 hover:underline underline-offset-4 whitespace-nowrap shrink-0"
+              onClick={() => setMobileMenuOpen(false)}
+              className="rounded-md px-3 py-2 hover:bg-slate-50 hover:text-slate-900"
             >
               Convert
             </a>
+            <a
+              href="#how-it-works"
+              onClick={() => setMobileMenuOpen(false)}
+              className="rounded-md px-3 py-2 hover:bg-slate-50 hover:text-slate-900"
+            >
+              How It Works
+            </a>
+            <a
+              href="#capabilities"
+              onClick={() => setMobileMenuOpen(false)}
+              className="rounded-md px-3 py-2 hover:bg-slate-50 hover:text-slate-900"
+            >
+              Capabilities
+            </a>
+            <a
+              href="#pricing"
+              onClick={() => setMobileMenuOpen(false)}
+              className="rounded-md px-3 py-2 hover:bg-slate-50 hover:text-slate-900"
+            >
+              Pricing
+            </a>
           </nav>
-
-          <button
-            type="button"
-            onClick={scrollToWorkspace}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-900 px-4 py-2 text-xs sm:text-sm font-semibold text-white hover:bg-emerald-800 transition-colors whitespace-nowrap shrink-0"
-          >
-            <span>Start Converting</span>
-            <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-          </button>
-        </div>
+        )}
       </header>
 
       <main className="flex-1">
         {/* Hero & Value Proposition */}
-        <section className="border-b border-slate-200 bg-white">
-          <div className="mx-auto max-w-6xl px-4 sm:px-6 py-12 sm:py-16 grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
+        <section className="relative border-b border-slate-200 bg-white overflow-hidden">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 bg-[radial-gradient(#cbd5e1_0.85px,transparent_0.85px)] [background-size:24px_24px] opacity-40"
+          />
+          <div className="relative mx-auto max-w-6xl px-4 sm:px-6 py-12 sm:py-16 grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
             <div className="lg:col-span-7 space-y-5">
-              <p className="text-xs font-medium tracking-wide uppercase text-emerald-900">
+              <p className="text-xs font-semibold tracking-wider uppercase text-emerald-900">
                 AcroForm Automation · Digital &amp; Scanned Forms · Page-Tier Pricing
               </p>
 
-              <h1 className="text-3xl sm:text-5xl font-bold tracking-tight text-slate-900 leading-[1.1] [text-wrap:balance]">
+              <h1 className="text-3xl sm:text-5xl font-bold tracking-tight text-slate-900 leading-[1.08] [text-wrap:balance]">
                 Turn Static PDFs &amp; Form Bundles Into Fillable AcroForms
               </h1>
 
@@ -651,12 +716,17 @@ export function PublicLandingConverter() {
             </div>
 
             <div className="lg:col-span-5">
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 space-y-4">
-                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                  Three-Step Client Workflow
-                </p>
-                <ol className="space-y-4">
-                  <li className="flex items-start gap-3.5">
+              <div className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+                <div className="border-b border-slate-200 bg-slate-50 px-5 py-3 flex items-center justify-between">
+                  <span className="text-[11px] font-mono font-semibold uppercase tracking-wider text-slate-600">
+                    Workflow Specification
+                  </span>
+                  <span className="text-[11px] font-mono text-emerald-900 font-medium">
+                    AcroForm v1.7
+                  </span>
+                </div>
+                <ol className="divide-y divide-slate-100 px-5 py-2">
+                  <li className="py-3.5 flex items-start gap-3.5">
                     <span className="h-7 w-7 rounded-md bg-emerald-900 text-white text-xs font-mono font-semibold flex items-center justify-center shrink-0">
                       01
                     </span>
@@ -670,7 +740,7 @@ export function PublicLandingConverter() {
                       </p>
                     </div>
                   </li>
-                  <li className="flex items-start gap-3.5">
+                  <li className="py-3.5 flex items-start gap-3.5">
                     <span className="h-7 w-7 rounded-md bg-slate-900 text-white text-xs font-mono font-semibold flex items-center justify-center shrink-0">
                       02
                     </span>
@@ -684,7 +754,7 @@ export function PublicLandingConverter() {
                       </p>
                     </div>
                   </li>
-                  <li className="flex items-start gap-3.5">
+                  <li className="py-3.5 flex items-start gap-3.5">
                     <span className="h-7 w-7 rounded-md bg-amber-600 text-white text-xs font-mono font-semibold flex items-center justify-center shrink-0">
                       03
                     </span>
@@ -744,28 +814,31 @@ export function PublicLandingConverter() {
             </div>
           )}
 
-          {/* Upload & Convert Card */}
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragActive(true);
-            }}
-            onDragLeave={() => setDragActive(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDragActive(false);
-              const dropped = e.dataTransfer.files?.[0];
-              if (!dropped) return;
-              if (dropped.name.toLowerCase().endsWith(".zip")) {
-                handleSelectZipFile(dropped);
-              } else {
-                handleSelectPdfFile(dropped);
-              }
-            }}
-            className={`rounded-xl border-2 border-dashed bg-white p-6 sm:p-8 transition-colors ${
-              dragActive ? "border-emerald-800 bg-emerald-50/40" : "border-slate-300"
-            }`}
-          >
+          {/* Upload & Convert Stationery Tray */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-2 shadow-sm">
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragActive(true);
+              }}
+              onDragLeave={() => setDragActive(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragActive(false);
+                const dropped = e.dataTransfer.files?.[0];
+                if (!dropped) return;
+                if (dropped.name.toLowerCase().endsWith(".zip")) {
+                  handleSelectZipFile(dropped);
+                } else {
+                  handleSelectPdfFile(dropped);
+                }
+              }}
+              className={`rounded-xl border border-dashed p-6 sm:p-8 transition-colors ${
+                dragActive
+                  ? "border-emerald-800 bg-emerald-50/40"
+                  : "border-slate-300 bg-[#FAFBFB]"
+              }`}
+            >
             <input
               ref={pdfInputRef}
               id="public-pdf-upload"
@@ -881,6 +954,7 @@ export function PublicLandingConverter() {
                 </div>
               </div>
             )}
+          </div>
           </div>
 
           {/* Converted Fillable PDF On-Screen Presentation + Summary + Locked Downloads & Pay CTA */}
@@ -1146,7 +1220,7 @@ export function PublicLandingConverter() {
         </section>
 
         {/* Transparent Page-Based Pricing Tiers */}
-        <section id="pricing" className="border-t border-slate-200 bg-slate-50">
+        <section id="pricing" className="border-t border-slate-200 bg-[#F7F8F7]">
           <div className="mx-auto max-w-6xl px-4 sm:px-6 py-14 space-y-8">
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
@@ -1171,20 +1245,32 @@ export function PublicLandingConverter() {
               {pricingTiers.map((tier) => (
                 <div
                   key={tier.id}
-                  className="rounded-xl border border-slate-200 bg-white p-6 flex flex-col justify-between space-y-5 shadow-sm"
+                  className="rounded-xl border border-slate-200 border-t-2 border-t-emerald-900 bg-white p-6 flex flex-col justify-between space-y-5 shadow-sm"
                 >
-                  <div className="space-y-2">
-                    <p className="text-xs font-mono uppercase tracking-wider text-slate-500">
-                      Up to {tier.max_pages} pages
-                    </p>
-                    <h3 className="text-lg font-bold text-slate-900">{tier.name}</h3>
+                  <div className="space-y-3">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <h3 className="text-base font-bold text-slate-900">{tier.name}</h3>
+                      <span className="text-xs font-mono text-slate-500 tabular-nums">
+                        {tier.max_pages}p max
+                      </span>
+                    </div>
                     <p className="text-3xl font-bold font-mono tabular-nums text-emerald-900">
                       {formatCurrency(tier.price_cents)}
                     </p>
-                    <p className="text-sm text-slate-600 leading-relaxed">
-                      Convert and preview documents up to {tier.max_pages} pages, then unlock PDF
-                      and ZIP downloads.
-                    </p>
+                    <ul className="space-y-2 pt-2 border-t border-slate-100 text-xs text-slate-600">
+                      <li className="flex items-center gap-2">
+                        <Check className="h-3.5 w-3.5 text-emerald-800 shrink-0" aria-hidden="true" />
+                        <span>Up to {tier.max_pages} pages per submission</span>
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <Check className="h-3.5 w-3.5 text-emerald-800 shrink-0" aria-hidden="true" />
+                        <span>Full on-screen AcroForm preview before payment</span>
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <Check className="h-3.5 w-3.5 text-emerald-800 shrink-0" aria-hidden="true" />
+                        <span>Instant fillable PDF &amp; ZIP bundle unlock</span>
+                      </li>
+                    </ul>
                   </div>
 
                   <button
@@ -1202,9 +1288,30 @@ export function PublicLandingConverter() {
       </main>
 
       <footer className="border-t border-slate-200 bg-white">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-6 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-500">
-          <span className="font-semibold text-slate-700">FormifyPDF</span>
-          <span>AcroForm PDF Conversion &amp; Form Intelligence</span>
+        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <BrandWordmark size={24} />
+            <p className="text-xs text-slate-500">
+              Precision AcroForm PDF conversion and page-tier document delivery.
+            </p>
+          </div>
+          <nav
+            aria-label="Footer navigation"
+            className="flex flex-wrap items-center gap-6 text-xs font-medium text-slate-600"
+          >
+            <a href="#convert-workspace" className="hover:text-slate-900 hover:underline underline-offset-4">
+              Convert
+            </a>
+            <a href="#how-it-works" className="hover:text-slate-900 hover:underline underline-offset-4">
+              How It Works
+            </a>
+            <a href="#capabilities" className="hover:text-slate-900 hover:underline underline-offset-4">
+              Capabilities
+            </a>
+            <a href="#pricing" className="hover:text-slate-900 hover:underline underline-offset-4">
+              Pricing
+            </a>
+          </nav>
         </div>
       </footer>
     </div>

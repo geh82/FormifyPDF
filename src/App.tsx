@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { BrandWordmark } from "./components/BrandMark.tsx";
 import { PublicLandingConverter } from "./components/PublicLandingConverter.tsx";
 import { ZipInspectorSection } from "./components/ZipInspectorSection.tsx";
 import { FormifyPdfStudio } from "./components/studio/FormifyPdfStudio.tsx";
@@ -15,14 +16,15 @@ function AdminWorkspace() {
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("studio");
 
   return (
-    <div id="top" className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
+    <div id="top" className="min-h-screen flex flex-col bg-[#F7F8F7] text-slate-900">
+      <header className="border-t-2 border-t-emerald-900 border-b border-slate-200 bg-white">
+        <div className="mx-auto max-w-6xl px-4 sm:px-6 h-16 flex items-center justify-between gap-8">
           <a
             href="#top"
-            className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
+            aria-label="FormifyPDF home"
+            className="whitespace-nowrap shrink-0"
           >
-            FormifyPDF
+            <BrandWordmark size={26} />
           </a>
 
           <nav
