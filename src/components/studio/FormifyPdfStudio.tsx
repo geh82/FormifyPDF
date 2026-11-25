@@ -1047,6 +1047,7 @@ export function FormifyPdfStudio() {
                       disabled={!hasPermission("documents:write")}
                       onChange={(e) => {
                         const f = e.target.files?.[0] || null;
+                        e.currentTarget.value = "";
                         handleSelectPdfFile(f);
                       }}
                       className="sr-only"
